@@ -4,6 +4,10 @@
   "description": "DeepSeek-powered AI coding assistant that can read, edit, and refactor files in your workspace at runtime.",
   "version": "1.0.0",
   "publisher": "deepcode",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Chaudhary-Adeel/deepcode"
+  },
   "icon": "media/icon.png",
   "engines": {
     "vscode": "^1.85.0"
