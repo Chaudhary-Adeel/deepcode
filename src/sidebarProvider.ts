@@ -215,6 +215,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     this._view?.webview.postMessage({ type: 'filesAttached', files: mapped });
                     break;
                 }
+                case 'webSearch': {
+                    const query = (data.query || '').trim();
+                    if (!query) { break; }
+                    this._view?.webview.postMessage({ type: 'agentStatus', status: `Searching web for: ${query}...` });
+                    try {
+                        const results = await this._subAgentService.webSearch(query);
+                        this._view?.webview.postMessage({ type: 'webSearchResults', query, results });
+                    } catch (err: any) {
+                        this._view?.webview.postMessage({ type: 'webSearchResults', query, results: '', error: err.message });
+                    }
+                    break;
+                }
                 case 'saveChat': {
                     const chats: any[] = this._context.globalState.get('deepcode.chatHistory', []);
                     const idx = chats.findIndex((c: any) => c.id === data.chat.id);
@@ -263,6 +275,36 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 this.sendSettings();
             }
         });
+    }
+
+    /**
+     * Search workspace files for code related to the file being edited.
+     * Extracts key identifiers and searches for their usages in other files.
+     */
+    private async findRelatedWorkspaceCode(fileContent: string, targetFileName: string): Promise<string> {
+        const idRegex = /(?:^|\s)(?:function|class|const|let|var|def|func|interface|type)\s+([A-Za-z_$][A-Za-z0-9_$]{2,})/gm;
+        const identifiers = new Set<string>();
+        let m: RegExpExecArray | null;
+        while ((m = idRegex.exec(fileContent)) !== null) {
+            identifiers.add(m[1]);
+        }
+        if (identifiers.size === 0) { return ''; }
+
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        const contextParts: string[] = [];
+
+        for (const id of Array.from(identifiers).slice(0, 3)) {
+            const results = await this._fileEditorService.searchWorkspaceContent(id, 4);
+            for (const result of results) {
+                if (result.file === targetFileName) { continue; }
+                const relPath = result.file.startsWith(workspaceRoot)
+                    ? result.file.slice(workspaceRoot.length + 1)
+                    : result.file.split('/').pop() || result.file;
+                contextParts.push(`${relPath}:${result.line}:\n${result.preview}`);
+            }
+        }
+
+        return contextParts.slice(0, 6).join('\n\n');
     }
 
     /**
@@ -416,9 +458,22 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             return;
         }
 
+        // Handle @web prefix: perform web search and include results as context
+        let actualMessage = message;
+        let webContext = '';
+        const webMatch = message.match(/^@web\s+(.+)/is);
+        if (webMatch) {
+            actualMessage = webMatch[1].trim();
+            this._view?.webview.postMessage({ type: 'agentStatus', status: `Searching web for: ${actualMessage}...` });
+            try {
+                webContext = await this._subAgentService.webSearch(actualMessage);
+            } catch { /* ignore web search errors */ }
+        }
+
         // Smart routing: if the message looks like an edit request, route to
         // the edit handler so changes are actually applied to the file.
-        if (this.looksLikeEditRequest(message)) {
+        // Skip edit routing when @web prefix is used (user explicitly wants chat + web context).
+        if (!webMatch && this.looksLikeEditRequest(actualMessage)) {
             let filesToEdit = attachedFiles && attachedFiles.length > 0 ? attachedFiles : [];
 
             // If no files were explicitly attached, try to resolve them from the message
@@ -465,8 +520,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             context += '\n\n--- Conversation History ---\n' + recent.map(m => `[${m.role}]: ${m.content.substring(0, 500)}`).join('\n') + '\n---';
         }
 
+        // Include web search results in context when @web prefix was used
+        if (webContext) {
+            context += `\n\n--- Web Search Results for "${actualMessage}" ---\n${webContext}\n---`;
+        }
+
         this._isCancelled = false;
-        this._chatHistory.push({ role: 'user', content: message });
+        this._chatHistory.push({ role: 'user', content: actualMessage });
 
         this._view?.webview.postMessage({ type: 'streamStart' });
 
@@ -477,7 +537,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const result = await this._subAgentService.orchestrateChat(
                 apiKey,
                 cfg.model,
-                message,
+                actualMessage,
                 context,
                 cfg.temperature,
                 cfg.topP,
@@ -658,6 +718,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         this._isCancelled = false;
         this._view?.webview.postMessage({ type: 'editStart' });
+
+        // Search workspace for related code to enrich edit context
+        this._view?.webview.postMessage({ type: 'agentStatus', status: 'Searching workspace for related code...' });
+        const relatedCode = await this.findRelatedWorkspaceCode(targetContent, targetFileName);
+        if (relatedCode) {
+            extraInstruction += '\n\nRelated workspace code (for reference):\n' + relatedCode;
+        }
 
         try {
             const cfg = this._deepseekService.getConfig();
@@ -1963,7 +2030,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     <path d="M9 2.5L6.5 8H8.5L7 13.5L10.5 7H8L9 2.5Z" fill="currentColor" stroke="none"/>
                 </svg>
                 <h2>DeepCode</h2>
-                <p>Ask anything about your code.<br>Use <kbd>#</kbd> to reference files as context.</p>
+                <p>Ask anything about your code.<br>Use <kbd>#</kbd> to reference files, <kbd>@web</kbd> to search the web.</p>
             </div>
         </div>
         <div id="processBar" class="process-bar hidden">
@@ -1973,12 +2040,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         <div class="chat-input-area">
             <div id="attachedFilesBar" class="attached-files-bar hidden"></div>
             <div class="input-wrapper">
-                <textarea class="chat-textarea" id="chatInput" placeholder="Ask anything... Use # to reference files" rows="3"></textarea>
+                <textarea class="chat-textarea" id="chatInput" placeholder="Ask anything... Use # for files, @web to search the web" rows="3"></textarea>
                 <div id="fileDropdown" class="file-dropdown hidden"></div>
             </div>
             <div class="action-buttons">
                 <button class="icon-btn" id="newChatBtn" title="New chat"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg></button>
                 <button class="icon-btn" id="attachBtn" title="Attach files (or use #)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.75 5.5v5a3.25 3.25 0 0 1-6.5 0V4.75a2 2 0 1 1 4 0v5.5a.75.75 0 0 1-1.5 0v-5"/></svg></button>
+                <button class="icon-btn" id="webSearchBtn" title="Search the web (or type @web <query>)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5c-1.5 1.5-2.5 3-2.5 5.5s1 4 2.5 5.5"/><path d="M8 2.5c1.5 1.5 2.5 3 2.5 5.5s-1 4-2.5 5.5"/><path d="M2.5 8h11"/></svg></button>
                 <button class="icon-btn" id="clearBtn" title="Clear chat"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4h10M6 4V3a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v1m1.5 0l-.5 8.5a1.5 1.5 0 0 1-1.5 1.5h-3A1.5 1.5 0 0 1 5 12.5L4.5 4"/></svg></button>
                 <div style="flex:1"></div>
                 <span class="token-ring" id="tokenRing" title="Context window usage">
@@ -2194,6 +2262,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         document.getElementById('stopBtn').addEventListener('click', () => stopGeneration());
         document.getElementById('newChatBtn').addEventListener('click', () => newChat());
         document.getElementById('attachBtn').addEventListener('click', () => attachFiles());
+        document.getElementById('webSearchBtn').addEventListener('click', () => insertWebPrefix());
         document.getElementById('clearBtn').addEventListener('click', () => clearChat());
         document.getElementById('settingsBtn').addEventListener('click', () => openSettings());
         document.getElementById('modalCloseBtn').addEventListener('click', () => closeSettings());
@@ -2402,7 +2471,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             chatTokens = 0;
             updateTokenRing(0);
             const messages = document.getElementById('chatMessages');
-            messages.innerHTML = '<div class=\"welcome-card\" id=\"welcomeCard\"><svg class=\"welcome-icon\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M5.5 3L2 8l3.5 5\"/><path d=\"M10.5 3L14 8l-3.5 5\"/><path d=\"M9 2.5L6.5 8H8.5L7 13.5L10.5 7H8L9 2.5Z\" fill=\"currentColor\" stroke=\"none\"/></svg><h2>DeepCode</h2><p>Ask anything about your code.<br>Use <kbd>#</kbd> to reference files as context.</p></div>';
+            messages.innerHTML = '<div class=\"welcome-card\" id=\"welcomeCard\"><svg class=\"welcome-icon\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M5.5 3L2 8l3.5 5\"/><path d=\"M10.5 3L14 8l-3.5 5\"/><path d=\"M9 2.5L6.5 8H8.5L7 13.5L10.5 7H8L9 2.5Z\" fill=\"currentColor\" stroke=\"none\"/></svg><h2>DeepCode</h2><p>Ask anything about your code.<br>Use <kbd>#</kbd> to reference files, <kbd>@web</kbd> to search the web.</p></div>';
             vscode.postMessage({ type: 'clearHistory' });
             chatInput.value = '';
             clearAttachedFiles();
@@ -2515,6 +2584,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         // --- File Attachments ---
         function attachFiles() {
             vscode.postMessage({ type: 'pickFiles' });
+        }
+
+        function insertWebPrefix() {
+            const input = document.getElementById('chatInput');
+            if (!input.value.startsWith('@web ')) {
+                input.value = '@web ' + input.value;
+            }
+            input.focus();
+            input.setSelectionRange(input.value.length, input.value.length);
         }
 
         function clearAttachedFiles() {
@@ -2874,6 +2952,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
                 case 'historyCleared': {
+                    break;
+                }
+                case 'webSearchResults': {
+                    hideProcessBar();
+                    if (data.error) {
+                        addMessage('system', 'Web search failed: ' + data.error);
+                    } else {
+                        addMessage('system', 'Web search for "' + escapeHtml(data.query) + '":\n' + escapeHtml(data.results));
+                    }
                     break;
                 }
                 case 'filesAttached': {

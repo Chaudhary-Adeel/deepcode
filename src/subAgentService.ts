@@ -453,6 +453,77 @@ export class SubAgentService {
         }
     }
 
+    // ─── Web Search ──────────────────────────────────────────────────────
+
+    /**
+     * Search the web using DuckDuckGo's Instant Answer API.
+     * Returns a formatted string of results suitable for use as AI context.
+     */
+    async webSearch(query: string): Promise<string> {
+        return new Promise((resolve) => {
+            let settled = false;
+            const done = (result: string) => {
+                if (!settled) { settled = true; resolve(result); }
+            };
+
+            const encodedQuery = encodeURIComponent(query);
+            const reqOpts: https.RequestOptions = {
+                hostname: 'api.duckduckgo.com',
+                port: 443,
+                path: `/?q=${encodedQuery}&format=json&no_html=1&no_redirect=1&skip_disambig=1`,
+                method: 'GET',
+                headers: {
+                    'User-Agent': 'DeepCode-VSCode-Extension/1.0',
+                    'Accept': 'application/json',
+                },
+            };
+
+            const req = https.request(reqOpts, (res) => {
+                let data = '';
+                res.on('data', (chunk) => { data += chunk; });
+                res.on('end', () => {
+                    try {
+                        const json = JSON.parse(data);
+                        const parts: string[] = [];
+
+                        if (json.Answer) {
+                            parts.push(`Answer: ${json.Answer}`);
+                        }
+                        if (json.AbstractText) {
+                            parts.push(`Summary: ${json.AbstractText}`);
+                            if (json.AbstractURL) {
+                                parts.push(`Source: ${json.AbstractURL}`);
+                            }
+                        }
+                        if (json.RelatedTopics && Array.isArray(json.RelatedTopics)) {
+                            const topics = json.RelatedTopics
+                                .filter((t: any) => t.Text)
+                                .slice(0, 5)
+                                .map((t: any) => `  • ${t.Text}`);
+                            if (topics.length > 0) {
+                                parts.push('Related:', ...topics);
+                            }
+                        }
+
+                        done(parts.length > 0
+                            ? parts.join('\n')
+                            : `No instant results found for: "${query}"`);
+                    } catch {
+                        done(`Could not parse search results for: "${query}"`);
+                    }
+                });
+            });
+
+            req.setTimeout(5000, () => {
+                done(`Search timed out for: "${query}"`);
+                req.destroy();
+            });
+
+            req.on('error', () => done(`Search unavailable for: "${query}"`));
+            req.end();
+        });
+    }
+
     // ─── LLM Call ────────────────────────────────────────────────────────
 
     /**
