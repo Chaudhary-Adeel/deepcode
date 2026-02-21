@@ -215,6 +215,52 @@ export class FileEditorService {
     }
 
     /**
+     * Search workspace file contents for a text pattern, returning matches with context lines.
+     */
+    async searchWorkspaceContent(
+        query: string,
+        maxResults: number = 10,
+    ): Promise<Array<{ file: string; line: number; preview: string }>> {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (!workspaceFolders || !query.trim()) { return []; }
+
+        const results: Array<{ file: string; line: number; preview: string }> = [];
+        const queryLower = query.toLowerCase();
+
+        try {
+            const files = await vscode.workspace.findFiles(
+                '**/*.{ts,js,tsx,jsx,py,java,cs,go,rs,rb,php,cpp,c,h,mjs,cjs}',
+                '{**/node_modules/**,**/.git/**,**/out/**,**/dist/**,**/__pycache__/**}',
+                100,
+            );
+
+            for (const fileUri of files) {
+                if (results.length >= maxResults) { break; }
+                try {
+                    const bytes = await vscode.workspace.fs.readFile(fileUri);
+                    const text = Buffer.from(bytes).toString('utf-8');
+                    if (text.includes('\0')) { continue; } // skip binary
+                    const lines = text.split('\n');
+                    for (let i = 0; i < lines.length; i++) {
+                        if (lines[i].toLowerCase().includes(queryLower)) {
+                            const start = Math.max(0, i - 1);
+                            const end = Math.min(lines.length - 1, i + 2);
+                            results.push({
+                                file: fileUri.fsPath,
+                                line: i + 1,
+                                preview: lines.slice(start, end + 1).join('\n'),
+                            });
+                            if (results.length >= maxResults) { break; }
+                        }
+                    }
+                } catch { /* skip unreadable */ }
+            }
+        } catch { /* workspace not available */ }
+
+        return results;
+    }
+
+    /**
      * Read a file from workspace by relative path
      */
     async readWorkspaceFile(relativePath: string): Promise<string | null> {
