@@ -1,0 +1,33 @@
+# Build output
+out/
+dist/
+
+# Dependencies
+node_modules/
+
+# VS Code extension package
+*.vsix
+
+# Testing
+.vscode-test/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+*~
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# TypeScript incremental compilation
+*.tsbuildinfo

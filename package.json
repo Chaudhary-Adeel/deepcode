@@ -1,0 +1,184 @@
+{
+  "name": "deepcode",
+  "displayName": "DeepCode - Coding Assistant",
+  "description": "DeepSeek-powered AI coding assistant that can read, edit, and refactor files in your workspace at runtime.",
+  "version": "1.0.0",
+  "publisher": "deepcode",
+  "icon": "media/icon.png",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "AI",
+    "Snippets",
+    "Formatters"
+  ],
+  "keywords": [
+    "deepseek",
+    "ai",
+    "code assistant",
+    "code editor",
+    "refactor",
+    "copilot"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "deepcode-sidebar",
+          "title": "DeepCode",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "deepcode-sidebar": [
+        {
+          "type": "webview",
+          "id": "deepcode.chatView",
+          "name": "DeepCode Assistant"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "deepcode.setApiKey",
+        "title": "DeepCode: Set API Key"
+      },
+      {
+        "command": "deepcode.clearApiKey",
+        "title": "DeepCode: Clear API Key"
+      },
+      {
+        "command": "deepcode.editFile",
+        "title": "DeepCode: Edit Current File with AI"
+      },
+      {
+        "command": "deepcode.explainCode",
+        "title": "DeepCode: Explain Selected Code"
+      },
+      {
+        "command": "deepcode.refactorCode",
+        "title": "DeepCode: Refactor Selected Code"
+      },
+      {
+        "command": "deepcode.openSettings",
+        "title": "DeepCode: Open Settings"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "deepcode.editFile",
+          "group": "deepcode@1",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "deepcode.explainCode",
+          "group": "deepcode@2",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "deepcode.refactorCode",
+          "group": "deepcode@3",
+          "when": "editorHasSelection"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "DeepCode",
+      "properties": {
+        "deepcode.model": {
+          "type": "string",
+          "default": "deepseek-chat",
+          "enum": [
+            "deepseek-chat",
+            "deepseek-reasoner"
+          ],
+          "enumDescriptions": [
+            "DeepSeek V3.2 — Fast, non-thinking mode",
+            "DeepSeek V3.2 — Thinking mode (chain-of-thought reasoning)"
+          ],
+          "description": "The DeepSeek model to use. Both run on V3.2 (128K context)."
+        },
+        "deepcode.temperature": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Sampling temperature (0 = deterministic, higher = more creative)."
+        },
+        "deepcode.maxTokens": {
+          "type": "number",
+          "default": 8192,
+          "minimum": 256,
+          "maximum": 65536,
+          "description": "Maximum number of tokens in the response."
+        },
+        "deepcode.topP": {
+          "type": "number",
+          "default": 0.95,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Top-p (nucleus) sampling parameter."
+        },
+        "deepcode.frequencyPenalty": {
+          "type": "number",
+          "default": 0,
+          "minimum": -2,
+          "maximum": 2,
+          "description": "Frequency penalty for token repetition."
+        },
+        "deepcode.presencePenalty": {
+          "type": "number",
+          "default": 0,
+          "minimum": -2,
+          "maximum": 2,
+          "description": "Presence penalty for topic repetition."
+        },
+        "deepcode.streamResponses": {
+          "type": "boolean",
+          "default": true,
+          "description": "Stream responses token by token for real-time output."
+        },
+        "deepcode.contextLines": {
+          "type": "number",
+          "default": 50,
+          "minimum": 10,
+          "maximum": 500,
+          "description": "Number of surrounding lines to include as context when editing."
+        },
+        "deepcode.autoSave": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically save files after AI edits are applied."
+        }
+      }
+    },
+    "keybindings": [
+      {
+        "command": "deepcode.editFile",
+        "key": "ctrl+shift+e",
+        "mac": "cmd+shift+e",
+        "when": "editorTextFocus"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {}
+}
