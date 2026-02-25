@@ -1049,6 +1049,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             flex-direction: column;
             overflow: hidden;
             line-height: 1.4;
+            position: relative;
         }
 
         /* ── Chat Container ─────────────────────────────── */
@@ -1449,11 +1450,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
 
         /* ── Settings Panel ─────────────────────────────── */
-        .settings-panel {
-            flex: 1;
-            overflow-y: auto;
-            padding: 12px;
-        }
 
         .settings-group {
             margin-bottom: 16px;
@@ -1607,11 +1603,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
 
         /* ── Account Panel ──────────────────────────────── */
-        .account-panel {
-            flex: 1;
-            overflow-y: auto;
-            padding: 12px;
-        }
 
         .account-section {
             margin-bottom: 20px;
@@ -1977,40 +1968,39 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         /* ── Settings Modal ─────────────────────────────── */
         .modal-overlay {
-            position: fixed;
+            position: absolute;
             top: 0; left: 0; right: 0; bottom: 0;
             background: var(--vscode-editor-background);
-            background: rgba(0,0,0,0.5);
             display: flex;
-            align-items: center;
-            justify-content: center;
+            flex-direction: column;
             z-index: 1000;
         }
 
         .modal {
-            background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
-            border: 1px solid var(--vscode-editorWidget-border, var(--vscode-editorGroup-border, var(--vscode-panel-border)));
-            border-radius: 4px;
-            width: 95%;
-            max-height: 90vh;
+            background: var(--vscode-editor-background);
             display: flex;
             flex-direction: column;
+            flex: 1;
             overflow: hidden;
-            box-shadow: 0 4px 24px rgba(0,0,0,0.3);
+            min-height: 0;
         }
 
         .modal-header {
             display: flex;
             align-items: center;
             justify-content: space-between;
-            padding: 10px 14px;
+            padding: 8px 12px;
             border-bottom: 1px solid var(--vscode-editorGroup-border, var(--vscode-panel-border));
             flex-shrink: 0;
+            background: var(--vscode-editor-background);
         }
 
         .modal-header h3 {
-            font-size: 13px;
+            font-size: 11px;
             font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--vscode-foreground);
         }
 
         .modal-close {
@@ -2040,24 +2030,45 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             display: flex;
             flex-direction: column;
             border-right: 1px solid var(--vscode-editorGroup-border, var(--vscode-panel-border));
-            width: 110px;
+            width: 40px;
             flex-shrink: 0;
             padding: 4px 0;
             background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+            overflow: hidden;
         }
 
         .modal-tab {
             background: none;
             border: none;
             color: var(--vscode-foreground);
-            padding: 8px 10px;
-            text-align: left;
+            padding: 8px 0;
+            text-align: center;
             cursor: pointer;
             font-size: 11px;
             font-family: var(--dc-font-family);
             border-left: 2px solid transparent;
-            opacity: 0.6;
+            opacity: 0.5;
             transition: all 0.1s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-tab .btn-icon {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-tab .btn-icon svg {
+            width: 16px !important;
+            height: 16px !important;
+        }
+
+        /* Hide text labels in tabs — icon only in compact sidebar */
+        .modal-tab .btn-icon {
+            font-size: 0;
+            gap: 0;
         }
 
         .modal-tab:hover {
@@ -2076,10 +2087,29 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             flex: 1;
             overflow-y: auto;
             min-width: 0;
+            min-height: 0;
         }
 
-        .mtab-content { display: none; }
-        .mtab-content.active { display: block; }
+        .mtab-content {
+            display: none;
+            height: 100%;
+        }
+        .mtab-content.active {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .settings-panel {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px;
+        }
+
+        .account-panel {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px;
+        }
 
         /* ── File Autocomplete Dropdown ─────────────────── */
         .input-wrapper { position: relative; }
@@ -2370,9 +2400,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             </div>
             <div class="modal-body">
                 <div class="modal-sidebar">
-                    <button class="modal-tab active" data-mtab="msettings"><span class="btn-icon"><svg viewBox="0 0 16 16" fill="currentColor" style="width:12px;height:12px"><path d="M9.1 1.3a1.1 1.1 0 0 0-2.2 0l-.1.9a.9.9 0 0 1-.54.72.9.9 0 0 1-.88-.1l-.72-.54a1.1 1.1 0 0 0-1.55 1.56l.53.71a.9.9 0 0 1 .11.89.9.9 0 0 1-.72.53l-.9.1a1.1 1.1 0 0 0 0 2.2l.9.1a.9.9 0 0 1 .72.54.9.9 0 0 1-.1.88l-.54.72a1.1 1.1 0 1 0 1.56 1.55l.71-.53a.9.9 0 0 1 .89-.11.9.9 0 0 1 .53.72l.1.9a1.1 1.1 0 0 0 2.2 0l.1-.9a.9.9 0 0 1 .54-.72.9.9 0 0 1 .88.1l.72.54a1.1 1.1 0 0 0 1.55-1.56l-.53-.71a.9.9 0 0 1-.11-.89.9.9 0 0 1 .72-.53l.9-.1a1.1 1.1 0 0 0 0-2.2l-.9-.1a.9.9 0 0 1-.72-.54.9.9 0 0 1 .1-.88l.54-.72a1.1 1.1 0 1 0-1.56-1.55l-.71.53a.9.9 0 0 1-.89.11.9.9 0 0 1-.53-.72l-.1-.9zM8 10.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5zM6.5 8a1.5 1.5 0 1 0 3 0 1.5 1.5 0 0 0-3 0z"/></svg>Settings</span></button>
-                    <button class="modal-tab" data-mtab="maccount"><span class="btn-icon"><svg viewBox="0 0 16 16" fill="currentColor" style="width:12px;height:12px"><path d="M8 1a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM6 4a2 2 0 1 1 4 0 2 2 0 0 1-4 0zm-1.5 7A2.5 2.5 0 0 0 2 13.5a.5.5 0 0 1-1 0A3.5 3.5 0 0 1 4.5 10h7A3.5 3.5 0 0 1 15 13.5a.5.5 0 0 1-1 0 2.5 2.5 0 0 0-2.5-2.5h-7z"/></svg>Account</span></button>
-                    <button class="modal-tab" data-mtab="mhistory"><span class="btn-icon"><svg viewBox="0 0 16 16" fill="currentColor" style="width:12px;height:12px"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zM2 8a6 6 0 1 1 12 0A6 6 0 0 1 2 8z"/><path d="M8 4v4.5l3 1.5-.4.9L7.5 9V4H8z"/></svg>History</span></button>
+                    <button class="modal-tab active" data-mtab="msettings" title="Settings"><span class="btn-icon"><svg viewBox="0 0 16 16" fill="currentColor" style="width:12px;height:12px"><path d="M9.1 1.3a1.1 1.1 0 0 0-2.2 0l-.1.9a.9.9 0 0 1-.54.72.9.9 0 0 1-.88-.1l-.72-.54a1.1 1.1 0 0 0-1.55 1.56l.53.71a.9.9 0 0 1 .11.89.9.9 0 0 1-.72.53l-.9.1a1.1 1.1 0 0 0 0 2.2l.9.1a.9.9 0 0 1 .72.54.9.9 0 0 1-.1.88l-.54.72a1.1 1.1 0 1 0 1.56 1.55l.71-.53a.9.9 0 0 1 .89-.11.9.9 0 0 1 .53.72l.1.9a1.1 1.1 0 0 0 2.2 0l.1-.9a.9.9 0 0 1 .54-.72.9.9 0 0 1 .88.1l.72.54a1.1 1.1 0 0 0 1.55-1.56l-.53-.71a.9.9 0 0 1-.11-.89.9.9 0 0 1 .72-.53l.9-.1a1.1 1.1 0 0 0 0-2.2l-.9-.1a.9.9 0 0 1-.72-.54.9.9 0 0 1 .1-.88l.54-.72a1.1 1.1 0 1 0-1.56-1.55l-.71.53a.9.9 0 0 1-.89.11.9.9 0 0 1-.53-.72l-.1-.9zM8 10.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5zM6.5 8a1.5 1.5 0 1 0 3 0 1.5 1.5 0 0 0-3 0z"/></svg></span></button>
+                    <button class="modal-tab" data-mtab="maccount" title="Account"><span class="btn-icon"><svg viewBox="0 0 16 16" fill="currentColor" style="width:12px;height:12px"><path d="M8 1a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM6 4a2 2 0 1 1 4 0 2 2 0 0 1-4 0zm-1.5 7A2.5 2.5 0 0 0 2 13.5a.5.5 0 0 1-1 0A3.5 3.5 0 0 1 4.5 10h7A3.5 3.5 0 0 1 15 13.5a.5.5 0 0 1-1 0 2.5 2.5 0 0 0-2.5-2.5h-7z"/></svg></span></button>
+                    <button class="modal-tab" data-mtab="mhistory" title="History"><span class="btn-icon"><svg viewBox="0 0 16 16" fill="currentColor" style="width:12px;height:12px"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zM2 8a6 6 0 1 1 12 0A6 6 0 0 1 2 8z"/><path d="M8 4v4.5l3 1.5-.4.9L7.5 9V4H8z"/></svg></span></button>
                 </div>
                 <div class="modal-content">
                     <div class="mtab-content active" id="mtab-msettings">
@@ -2563,9 +2593,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         document.getElementById('clearBtn').addEventListener('click', () => clearChat());
         document.getElementById('settingsBtn').addEventListener('click', () => openSettings());
         document.getElementById('modalCloseBtn').addEventListener('click', () => closeSettings());
-        document.getElementById('settingsModal').addEventListener('click', (e) => {
-            if (e.target === document.getElementById('settingsModal')) closeSettings();
-        });
 
         // --- Wire up settings controls ---
         document.getElementById('setting-model').addEventListener('change', function() { updateSetting('model', this.value); });
