@@ -448,6 +448,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return resolvedPaths;
     }
 
+    private _toolCallCounter = 0;
+
     private async handleChatMessage(message: string, attachedFiles?: string[]) {
         const apiKey = await this._deepseekService.getApiKey(this._context);
         if (!apiKey) {
@@ -490,8 +492,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 await this.handleEditFile(message, filesToEdit);
                 return;
             }
-            // If we still can't find files, fall through to chat — the AI will
-            // explain the change and we can try to apply it from context.
+            // If we still can't find files, fall through to chat — the agent
+            // will use tools to find and edit files autonomously.
         }
 
         // Get active editor context
@@ -533,17 +535,41 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         try {
             const cfg = this._deepseekService.getConfig();
 
-            // Use multi-agent orchestration
-            const result = await this._subAgentService.orchestrateChat(
+            // Use the full agentic tool-use loop with real-time visibility
+            const result = await this._subAgentService.runAgentLoop(
                 apiKey,
                 cfg.model,
                 actualMessage,
                 context,
                 cfg.temperature,
                 cfg.topP,
+                attachedFiles,
+                undefined, // conversationHistory — managed separately
+                // onStatus
                 (status) => {
                     this._view?.webview.postMessage({ type: 'agentStatus', status });
                 },
+                // onToolCall — real-time tool call visibility
+                (toolName, args) => {
+                    this._toolCallCounter++;
+                    this._view?.webview.postMessage({
+                        type: 'toolCall',
+                        name: toolName,
+                        args,
+                        callId: this._toolCallCounter,
+                    });
+                },
+                // onToolResult — tool completion feedback
+                (toolName, toolResult) => {
+                    this._view?.webview.postMessage({
+                        type: 'toolResult',
+                        name: toolName,
+                        success: toolResult.success,
+                        output: toolResult.output,
+                        callId: this._toolCallCounter,
+                    });
+                },
+                // checkCancelled
                 () => this._isCancelled,
             );
 
@@ -559,10 +585,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
             this._chatHistory.push({ role: 'assistant', content: result.content });
 
+            // Build agent summary for UI
+            const agentsUsed: string[] = ['logic'];
+            if (result.toolCalls.length > 0) { agentsUsed.push('tools'); }
+            if (result.subAgentResults.length > 0) { agentsUsed.push('subagents'); }
+
             this._view?.webview.postMessage({
                 type: 'streamEnd',
                 usage: { total_tokens: result.totalTokens, prompt_tokens: 0, completion_tokens: 0 },
-                agentsUsed: result.agentsUsed,
+                agentsUsed,
+                toolCallCount: result.toolCalls.length,
+                iterations: result.iterations,
+                subAgentCount: result.subAgentResults.length,
             });
         } catch (error: any) {
             if (this._isCancelled) {
@@ -1618,6 +1652,127 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             color: var(--vscode-badge-foreground);
             font-family: var(--dc-font-family);
             font-weight: 600;
+        }
+
+        /* ── Tool call blocks ───────────────────────────── */
+        .tool-calls-container {
+            margin: 4px 0;
+            padding: 0;
+        }
+
+        .tool-call-block {
+            border: 1px solid var(--vscode-editorGroup-border, var(--vscode-panel-border));
+            border-radius: 4px;
+            margin: 3px 0;
+            overflow: hidden;
+            font-size: 11px;
+        }
+
+        .tool-call-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 8px;
+            background: var(--vscode-editor-inactiveSelectionBackground, rgba(255,255,255,0.04));
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .tool-call-header:hover {
+            background: var(--vscode-list-hoverBackground);
+        }
+
+        .tool-call-icon {
+            font-size: 12px;
+            flex-shrink: 0;
+            width: 16px;
+            text-align: center;
+        }
+
+        .tool-call-icon.spinning {
+            animation: spin 0.8s linear infinite;
+        }
+
+        .tool-call-name {
+            font-weight: 600;
+            font-family: var(--dc-editor-font);
+            color: var(--vscode-textLink-foreground);
+        }
+
+        .tool-call-summary {
+            color: var(--vscode-descriptionForeground);
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .tool-call-chevron {
+            flex-shrink: 0;
+            color: var(--vscode-descriptionForeground);
+            font-size: 10px;
+            transition: transform 0.15s;
+        }
+
+        .tool-call-block.expanded .tool-call-chevron {
+            transform: rotate(90deg);
+        }
+
+        .tool-call-details {
+            display: none;
+            padding: 6px 8px;
+            border-top: 1px solid var(--vscode-editorGroup-border, var(--vscode-panel-border));
+            font-family: var(--dc-editor-font);
+            font-size: var(--dc-editor-font-size);
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 200px;
+            overflow-y: auto;
+            color: var(--vscode-descriptionForeground);
+            background: var(--vscode-editor-background);
+        }
+
+        .tool-call-block.expanded .tool-call-details {
+            display: block;
+        }
+
+        .tool-call-status-success {
+            color: var(--vscode-testing-iconPassed, #73c991);
+        }
+
+        .tool-call-status-fail {
+            color: var(--vscode-testing-iconFailed, #f14c4c);
+        }
+
+        .subagent-block {
+            border-left: 2px solid var(--vscode-textLink-foreground);
+            margin: 4px 0;
+            padding: 4px 8px;
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+        }
+
+        .subagent-block .subagent-label {
+            font-weight: 600;
+            color: var(--vscode-textLink-foreground);
+        }
+
+        .tool-calls-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+            cursor: pointer;
+            margin: 4px 0;
+            user-select: none;
+            padding: 2px 4px;
+            border-radius: 3px;
+        }
+
+        .tool-calls-toggle:hover {
+            background: var(--vscode-toolbar-hoverBackground);
+            color: var(--vscode-foreground);
         }
 
         /* ── Attached files bar ─────────────────────────── */
@@ -2983,6 +3138,77 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 case 'chatList': {
                     renderChatList(data.chats || []);
+                    break;
+                }
+                case 'toolCall': {
+                    // A tool was called during the agent loop
+                    if (currentStreamEl) {
+                        let container = currentStreamEl.querySelector('.tool-calls-container');
+                        if (!container) {
+                            container = document.createElement('div');
+                            container.className = 'tool-calls-container';
+                            currentStreamEl.appendChild(container);
+                        }
+
+                        const block = document.createElement('div');
+                        block.className = 'tool-call-block';
+                        block.id = 'tc-' + (data.callId || Date.now());
+
+                        const toolIcon = data.name === 'run_subagent' ? '🤖'
+                            : data.name === 'read_file' ? '📖'
+                            : data.name === 'write_file' ? '✏️'
+                            : data.name === 'edit_file' ? '🔧'
+                            : data.name === 'grep_search' ? '🔍'
+                            : data.name === 'search_files' ? '📂'
+                            : data.name === 'list_directory' ? '📁'
+                            : data.name === 'run_command' ? '▶️'
+                            : data.name === 'get_diagnostics' ? '⚠️'
+                            : '⚡';
+
+                        const summary = data.args && data.args.path ? data.args.path
+                            : data.args && data.args.query ? data.args.query
+                            : data.args && data.args.pattern ? data.args.pattern
+                            : data.args && data.args.command ? data.args.command.substring(0, 60)
+                            : data.args && data.args.task ? data.args.task.substring(0, 60)
+                            : '';
+
+                        block.innerHTML = ''
+                            + '<div class="tool-call-header">'
+                            +   '<span class="tool-call-icon spinning">⏳</span>'
+                            +   '<span class="tool-call-name">' + escapeHtml(data.name) + '</span>'
+                            +   '<span class="tool-call-summary">' + escapeHtml(summary) + '</span>'
+                            +   '<span class="tool-call-chevron">▶</span>'
+                            + '</div>'
+                            + '<div class="tool-call-details">Running...</div>';
+
+                        block.querySelector('.tool-call-header').addEventListener('click', function() {
+                            this.parentElement.classList.toggle('expanded');
+                        });
+
+                        container.appendChild(block);
+                        const messages = document.getElementById('chatMessages');
+                        messages.scrollTop = messages.scrollHeight;
+                    }
+                    break;
+                }
+                case 'toolResult': {
+                    const block = document.getElementById('tc-' + data.callId);
+                    if (block) {
+                        const icon = block.querySelector('.tool-call-icon');
+                        icon.classList.remove('spinning');
+                        if (data.success) {
+                            icon.textContent = '✅';
+                            icon.className = 'tool-call-icon tool-call-status-success';
+                        } else {
+                            icon.textContent = '❌';
+                            icon.className = 'tool-call-icon tool-call-status-fail';
+                        }
+                        const details = block.querySelector('.tool-call-details');
+                        if (details) {
+                            const output = (data.output || '').substring(0, 2000);
+                            details.textContent = output + (data.output && data.output.length > 2000 ? '\\n... (truncated)' : '');
+                        }
+                    }
                     break;
                 }
             }
