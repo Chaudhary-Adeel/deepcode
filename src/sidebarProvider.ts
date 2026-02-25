@@ -838,18 +838,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const { editResult, targetDocument, agentsUsed, totalTokens } = pending;
 
         try {
-            // Ensure target document is open and active
-            const editor = vscode.window.activeTextEditor;
-            let targetEditor: vscode.TextEditor;
+            // Open the document without showing it — applyEdits handles everything
+            const doc = await vscode.workspace.openTextDocument(targetDocument.uri);
 
-            if (editor && editor.document.uri.toString() === targetDocument.uri.toString()) {
-                targetEditor = editor;
-            } else {
-                const doc = await vscode.workspace.openTextDocument(targetDocument.uri);
-                targetEditor = await vscode.window.showTextDocument(doc, { preview: false });
-            }
-
-            const success = await this._fileEditorService.applyEdits(targetEditor.document, editResult);
+            const success = await this._fileEditorService.applyEdits(doc, editResult);
             this._view?.webview.postMessage({
                 type: 'editComplete',
                 success,
@@ -1757,6 +1749,116 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             font-weight: 600;
         }
 
+        /* ── Inline activity feed ──────────────────────── */
+        .activity-feed {
+            margin: 2px 0 6px;
+            padding: 0;
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+        }
+
+        .activity-feed.collapsed {
+            display: none;
+        }
+
+        .activity-step {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 0;
+            opacity: 0.5;
+            transition: opacity 0.3s;
+            line-height: 1.3;
+        }
+
+        .activity-step.current {
+            opacity: 1;
+            color: var(--vscode-foreground);
+        }
+
+        .activity-step .step-icon {
+            flex-shrink: 0;
+            width: 14px;
+            height: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .activity-step .step-icon svg {
+            width: 12px;
+            height: 12px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 1.5;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .activity-step .step-icon.spinning svg {
+            animation: spin 0.8s linear infinite;
+            color: var(--vscode-textLink-foreground);
+        }
+
+        .activity-step .step-icon.done svg {
+            color: var(--vscode-testing-iconPassed, #73c991);
+        }
+
+        .activity-step .step-text {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .activity-step .step-time {
+            flex-shrink: 0;
+            font-size: 10px;
+            color: var(--vscode-descriptionForeground);
+            opacity: 0.7;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .activity-feed-summary {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 10px;
+            color: var(--vscode-descriptionForeground);
+            margin: 2px 0 6px;
+            cursor: pointer;
+            user-select: none;
+            padding: 2px 4px;
+            border-radius: 3px;
+        }
+
+        .activity-feed-summary:hover {
+            background: var(--vscode-toolbar-hoverBackground);
+            color: var(--vscode-foreground);
+        }
+
+        .activity-feed-summary svg {
+            width: 10px;
+            height: 10px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            transition: transform 0.15s;
+        }
+
+        .activity-feed-summary.expanded-summary svg {
+            transform: rotate(90deg);
+        }
+
+        .process-bar .elapsed-time {
+            margin-left: auto;
+            font-variant-numeric: tabular-nums;
+            opacity: 0.7;
+            font-size: 10px;
+        }
+
         /* ── Tool call blocks ───────────────────────────── */
         .tool-calls-container {
             margin: 4px 0;
@@ -2363,6 +2465,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         <div id="processBar" class="process-bar hidden">
             <span class="process-spinner"></span>
             <span id="processText"></span>
+            <span class="elapsed-time" id="elapsedTime"></span>
         </div>
         <div class="chat-input-area">
             <div id="attachedFilesBar" class="attached-files-bar hidden"></div>
@@ -3283,14 +3386,36 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
 
         // --- Process Bar ---
+        var processStartTime = null;
+        var elapsedInterval = null;
+
         function showProcessBar(text) {
             const bar = document.getElementById('processBar');
             document.getElementById('processText').textContent = text;
             bar.classList.remove('hidden');
+            if (!processStartTime) {
+                processStartTime = Date.now();
+                updateElapsed();
+                elapsedInterval = setInterval(updateElapsed, 1000);
+            }
         }
 
         function hideProcessBar() {
             document.getElementById('processBar').classList.add('hidden');
+            if (elapsedInterval) {
+                clearInterval(elapsedInterval);
+                elapsedInterval = null;
+            }
+            processStartTime = null;
+            document.getElementById('elapsedTime').textContent = '';
+        }
+
+        function updateElapsed() {
+            if (!processStartTime) return;
+            var secs = Math.floor((Date.now() - processStartTime) / 1000);
+            var m = Math.floor(secs / 60);
+            var s = secs % 60;
+            document.getElementById('elapsedTime').textContent = (m > 0 ? m + 'm ' : '') + s + 's';
         }
 
         // --- Token Ring ---
@@ -3325,6 +3450,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (typing) typing.remove();
             const sl = document.getElementById('agentStatusLine');
             if (sl) sl.remove();
+            var afStop = document.getElementById('activityFeed');
+            if (afStop) afStop.remove();
+            if (currentStreamEl) {
+                var afSumStop = currentStreamEl.querySelector('.activity-feed-summary');
+                if (afSumStop) afSumStop.remove();
+            }
             if (currentStreamEl && !currentStreamRaw) {
                 currentStreamEl.remove();
             }
@@ -3343,6 +3474,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     document.getElementById('sendBtn').classList.add('hidden');
                     document.getElementById('stopBtn').classList.remove('hidden');
                     currentStreamEl = addMessage('assistant', '');
+                    // Create inline activity feed
+                    var feed = document.createElement('div');
+                    feed.className = 'activity-feed';
+                    feed.id = 'activityFeed';
+                    currentStreamEl.appendChild(feed);
                     const typing = document.createElement('div');
                     typing.className = 'typing-indicator';
                     typing.id = 'typingIndicator';
@@ -3356,8 +3492,43 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     if (currentStreamEl) {
                         const typing = document.getElementById('typingIndicator');
                         if (typing) typing.remove();
+                        // Collapse activity feed into summary when response starts
+                        var afTokenFeed = document.getElementById('activityFeed');
+                        if (afTokenFeed && !afTokenFeed.classList.contains('collapsed')) {
+                            var stepCount = afTokenFeed.querySelectorAll('.activity-step').length;
+                            if (stepCount > 0) {
+                                afTokenFeed.classList.add('collapsed');
+                                var elapsed = processStartTime ? Math.floor((Date.now() - processStartTime) / 1000) : 0;
+                                var summaryDiv = document.createElement('div');
+                                summaryDiv.className = 'activity-feed-summary';
+                                summaryDiv.innerHTML = '<svg viewBox="0 0 16 16"><polyline points="6 4 10 8 6 12"/></svg>'
+                                    + '<span>' + stepCount + ' step' + (stepCount !== 1 ? 's' : '') + ' completed'
+                                    + (elapsed > 0 ? ' in ' + (elapsed >= 60 ? Math.floor(elapsed/60) + 'm ' : '') + (elapsed % 60) + 's' : '')
+                                    + '</span>';
+                                summaryDiv.addEventListener('click', function() {
+                                    this.classList.toggle('expanded-summary');
+                                    afTokenFeed.classList.toggle('collapsed');
+                                });
+                                currentStreamEl.insertBefore(summaryDiv, currentStreamEl.firstChild);
+                            } else {
+                                afTokenFeed.remove();
+                            }
+                        }
                         currentStreamRaw += data.token;
+                        // Preserve activity feed / summary + tool calls when reformatting
+                        var preservedEls = [];
+                        if (currentStreamEl) {
+                            var afEl = currentStreamEl.querySelector('.activity-feed');
+                            var sumEl = currentStreamEl.querySelector('.activity-feed-summary');
+                            var tcEl = currentStreamEl.querySelector('.tool-calls-container');
+                            if (afEl) preservedEls.push(afEl);
+                            if (sumEl) preservedEls.push(sumEl);
+                            if (tcEl) preservedEls.push(tcEl);
+                        }
                         currentStreamEl.innerHTML = formatContent(currentStreamRaw);
+                        for (var pi = preservedEls.length - 1; pi >= 0; pi--) {
+                            currentStreamEl.insertBefore(preservedEls[pi], currentStreamEl.firstChild);
+                        }
                         const messages = document.getElementById('chatMessages');
                         messages.scrollTop = messages.scrollHeight;
                     }
@@ -3368,6 +3539,44 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     document.getElementById('sendBtn').classList.remove('hidden');
                     document.getElementById('sendBtn').disabled = false;
                     document.getElementById('stopBtn').classList.add('hidden');
+                    // Finalize activity feed before hiding process bar
+                    var afEnd = document.getElementById('activityFeed');
+                    if (afEnd) {
+                        // Mark last step as done
+                        var lastStep = afEnd.querySelector('.activity-step.current');
+                        if (lastStep) {
+                            lastStep.classList.remove('current');
+                            var lsIcon = lastStep.querySelector('.step-icon');
+                            if (lsIcon) {
+                                lsIcon.classList.remove('spinning');
+                                lsIcon.classList.add('done');
+                                lsIcon.innerHTML = '<svg viewBox="0 0 16 16"><polyline points="3.5 8.5 6.5 11.5 12.5 5.5"/></svg>';
+                            }
+                        }
+                        // Collapse if not already
+                        if (!afEnd.classList.contains('collapsed')) {
+                            var endStepCount = afEnd.querySelectorAll('.activity-step').length;
+                            if (endStepCount > 0 && currentStreamEl) {
+                                afEnd.classList.add('collapsed');
+                                var endElapsed = processStartTime ? Math.floor((Date.now() - processStartTime) / 1000) : 0;
+                                var endSummary = document.createElement('div');
+                                endSummary.className = 'activity-feed-summary';
+                                endSummary.innerHTML = '<svg viewBox="0 0 16 16"><polyline points="6 4 10 8 6 12"/></svg>'
+                                    + '<span>' + endStepCount + ' step' + (endStepCount !== 1 ? 's' : '') + ' completed'
+                                    + (endElapsed > 0 ? ' in ' + (endElapsed >= 60 ? Math.floor(endElapsed/60) + 'm ' : '') + (endElapsed % 60) + 's' : '')
+                                    + '</span>';
+                                endSummary.addEventListener('click', function() {
+                                    this.classList.toggle('expanded-summary');
+                                    afEnd.classList.toggle('collapsed');
+                                });
+                                currentStreamEl.insertBefore(endSummary, currentStreamEl.firstChild);
+                            } else if (endStepCount === 0) {
+                                afEnd.remove();
+                            }
+                        }
+                        // Remove id so next stream gets a fresh feed
+                        afEnd.removeAttribute('id');
+                    }
                     hideProcessBar();
                     const typing2 = document.getElementById('typingIndicator');
                     if (typing2) typing2.remove();
@@ -3442,6 +3651,37 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 case 'agentStatus': {
                     showProcessBar(data.status);
+                    // Add step to inline activity feed
+                    var afeed = document.getElementById('activityFeed');
+                    if (afeed && !afeed.classList.contains('collapsed')) {
+                        // Mark previous step as done
+                        var prevStep = afeed.querySelector('.activity-step.current');
+                        if (prevStep) {
+                            prevStep.classList.remove('current');
+                            var prevIcon = prevStep.querySelector('.step-icon');
+                            if (prevIcon) {
+                                prevIcon.classList.remove('spinning');
+                                prevIcon.classList.add('done');
+                                prevIcon.innerHTML = '<svg viewBox="0 0 16 16"><polyline points="3.5 8.5 6.5 11.5 12.5 5.5"/></svg>';
+                            }
+                            // Add elapsed to completed step
+                            var prevTime = prevStep.querySelector('.step-time');
+                            if (prevTime && processStartTime) {
+                                var sNow = Math.floor((Date.now() - processStartTime) / 1000);
+                                prevTime.textContent = (sNow >= 60 ? Math.floor(sNow/60) + 'm ' : '') + (sNow % 60) + 's';
+                            }
+                        }
+                        // Add new step
+                        var step = document.createElement('div');
+                        step.className = 'activity-step current';
+                        step.innerHTML = ''
+                            + '<span class="step-icon spinning"><svg viewBox="0 0 16 16"><path d="M8 1.5A6.5 6.5 0 1 0 14.5 8" stroke-width="1.5"/></svg></span>'
+                            + '<span class="step-text">' + escapeHtml(data.status) + '</span>'
+                            + '<span class="step-time"></span>';
+                        afeed.appendChild(step);
+                        var messages = document.getElementById('chatMessages');
+                        messages.scrollTop = messages.scrollHeight;
+                    }
                     break;
                 }
                 case 'editProposal': {
@@ -3530,6 +3770,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     if (gsTyping) gsTyping.remove();
                     const gsSl = document.getElementById('agentStatusLine');
                     if (gsSl) gsSl.remove();
+                    var afGS = document.getElementById('activityFeed');
+                    if (afGS) afGS.remove();
+                    if (currentStreamEl) {
+                        var afSumGS = currentStreamEl.querySelector('.activity-feed-summary');
+                        if (afSumGS) afSumGS.remove();
+                    }
                     if (currentStreamEl && !currentStreamRaw) {
                         currentStreamEl.remove();
                     }

@@ -238,66 +238,55 @@ export class SubAgentService {
 
         const relativePath = this.getRelativePath(fileName);
 
-        // Case 1: Agent used edit_file on the target file
-        const extractedEdits = this.extractEditsFromToolCalls(result, relativePath);
-        if (extractedEdits.length > 0) {
-            // Revert the file so the caller can apply edits through its own
-            // approval + applyEdits workflow.
-            await this.revertFile(fileName, fileContent);
-
-            const explanation = result.content
-                ? this.truncate(result.content, 500)
-                : `Applied ${extractedEdits.length} edit(s) to ${relativePath || fileName}`;
-
-            const jsonResponse = JSON.stringify({
-                edits: extractedEdits,
-                explanation,
-            });
-
-            return {
-                content: jsonResponse,
-                agentResults: [{
-                    role: 'logic' as AgentRole,
-                    content: jsonResponse,
-                    tokens: result.totalTokens,
-                }],
-                totalTokens: result.totalTokens,
-                agentsUsed: this.inferAgentsUsed(result),
-            };
-        }
-
-        // Case 2: Agent used write_file on the target file
-        const writeCall = result.toolCalls.find(
-            tc => tc.name === 'write_file' &&
+        // Check if the agent modified the target file via edit_file or write_file
+        const touchedTarget = result.toolCalls.some(
+            tc => (tc.name === 'edit_file' || tc.name === 'write_file' || tc.name === 'multi_edit_files') &&
                   this.pathsMatch(tc.args.path, relativePath)
         );
 
-        if (writeCall) {
-            await this.revertFile(fileName, fileContent);
+        if (touchedTarget) {
+            // Read the file's FINAL content after all agent edits
+            let finalContent: string;
+            try {
+                const uri = vscode.Uri.file(fileName);
+                const doc = await vscode.workspace.openTextDocument(uri);
+                finalContent = doc.getText();
+            } catch {
+                finalContent = fileContent; // fallback — no change detected
+            }
 
-            const newContent = writeCall.args.content || '';
-            const explanation = result.content
-                ? this.truncate(result.content, 500)
-                : 'File rewritten by agent';
+            // Only proceed if the file actually changed
+            if (finalContent !== fileContent) {
+                // Revert the file so the caller can apply edits through its own
+                // approval + applyEdits workflow.
+                await this.revertFile(fileName, fileContent);
 
-            const jsonResponse = JSON.stringify({
-                edits: [{ oldText: fileContent, newText: newContent }],
-                explanation,
-            });
+                const explanation = result.content
+                    ? this.truncate(result.content, 500)
+                    : `Applied edits to ${relativePath || fileName}`;
 
-            return {
-                content: jsonResponse,
-                agentResults: [{
-                    role: 'logic' as AgentRole,
+                // Use a single unified diff edit: original → final.
+                // This avoids the problem of interdependent sequential edits
+                // where edit N's oldText refers to the file after edit N-1.
+                const jsonResponse = JSON.stringify({
+                    edits: [{ oldText: fileContent, newText: finalContent }],
+                    explanation,
+                });
+
+                return {
                     content: jsonResponse,
-                    tokens: result.totalTokens,
-                }],
-                totalTokens: result.totalTokens,
-                agentsUsed: this.inferAgentsUsed(result),
-            };
+                    agentResults: [{
+                        role: 'logic' as AgentRole,
+                        content: jsonResponse,
+                        tokens: result.totalTokens,
+                    }],
+                    totalTokens: result.totalTokens,
+                    agentsUsed: this.inferAgentsUsed(result),
+                };
+            }
         }
 
-        // Case 3: Agent didn't use file tools — return raw content.
+        // Agent didn't modify the target file — return raw content.
         // The caller will attempt parseEditResponse as a fallback.
         return this.mapToOrchestratedResponse(result);
     }
@@ -572,32 +561,6 @@ export class SubAgentService {
      * Extract individual {oldText, newText} edits from edit_file tool calls
      * that targeted a specific file path.
      */
-    private extractEditsFromToolCalls(
-        result: AgentLoopResult,
-        targetPath: string,
-    ): Array<{ oldText: string; newText: string }> {
-        const edits: Array<{ oldText: string; newText: string }> = [];
-
-        for (const tc of result.toolCalls) {
-            if (tc.name !== 'edit_file') { continue; }
-            if (!this.pathsMatch(tc.args.path, targetPath)) { continue; }
-
-            const tcEdits = tc.args.edits;
-            if (Array.isArray(tcEdits)) {
-                for (const edit of tcEdits) {
-                    if (edit.oldText !== undefined && edit.newText !== undefined) {
-                        edits.push({
-                            oldText: String(edit.oldText),
-                            newText: String(edit.newText),
-                        });
-                    }
-                }
-            }
-        }
-
-        return edits;
-    }
-
     /**
      * Revert a file to its original content.
      * Uses the VS Code editor API when possible (preserves undo stack),
@@ -609,34 +572,14 @@ export class SubAgentService {
     ): Promise<void> {
         try {
             const uri = vscode.Uri.file(filePath);
-
-            // Try to revert through the editor API for undo support
-            const doc = await vscode.workspace.openTextDocument(uri);
-            const editor = await vscode.window.showTextDocument(doc, {
-                preview: false,
-                preserveFocus: true,
-            });
-
-            const fullRange = new vscode.Range(
-                doc.positionAt(0),
-                doc.positionAt(doc.getText().length),
+            // Write directly to disk without opening/showing the file
+            await vscode.workspace.fs.writeFile(
+                uri,
+                Buffer.from(originalContent, 'utf-8')
             );
-
-            await editor.edit((editBuilder) => {
-                editBuilder.replace(fullRange, originalContent);
-            });
         } catch {
-            // Fallback: write directly to disk
-            try {
-                const uri = vscode.Uri.file(filePath);
-                await vscode.workspace.fs.writeFile(
-                    uri,
-                    Buffer.from(originalContent, 'utf-8')
-                );
-            } catch {
-                // Best-effort — if we can't revert, the caller's applyEdits
-                // will fail gracefully on oldText mismatch.
-            }
+            // Best-effort — if we can't revert, the caller's applyEdits
+            // will fail gracefully on oldText mismatch.
         }
     }
 
