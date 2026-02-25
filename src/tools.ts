@@ -521,17 +521,6 @@ export class ToolExecutor {
 
         await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf-8'));
 
-        // Open the file in editor so user can see it
-        try {
-            const doc = await vscode.workspace.openTextDocument(uri);
-            await vscode.window.showTextDocument(doc, {
-                preview: false,
-                preserveFocus: true,
-            });
-        } catch {
-            // Non-critical — file was still written
-        }
-
         const lineCount = content.split('\n').length;
         return {
             success: true,
@@ -590,21 +579,8 @@ export class ToolExecutor {
         }
 
         if (appliedCount > 0) {
-            // Apply through VS Code editor API for undo support
-            const doc = await vscode.workspace.openTextDocument(uri);
-            const editor = await vscode.window.showTextDocument(doc, {
-                preview: false,
-                preserveFocus: true,
-            });
-
-            const fullRange = new vscode.Range(
-                doc.positionAt(0),
-                doc.positionAt(doc.getText().length)
-            );
-
-            await editor.edit((editBuilder) => {
-                editBuilder.replace(fullRange, content);
-            });
+            // Write directly to disk — no need to open/show the file
+            await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf-8'));
         }
 
         let output = `Applied ${appliedCount}/${edits.length} edit(s) to ${filePath}`;
@@ -730,18 +706,8 @@ export class ToolExecutor {
         }
 
         if (applied > 0) {
-            const doc = await vscode.workspace.openTextDocument(uri);
-            const editor = await vscode.window.showTextDocument(doc, {
-                preview: false,
-                preserveFocus: true,
-            });
-            const fullRange = new vscode.Range(
-                doc.positionAt(0),
-                doc.positionAt(doc.getText().length)
-            );
-            await editor.edit((editBuilder) => {
-                editBuilder.replace(fullRange, content);
-            });
+            // Write directly to disk — no need to open/show the file
+            await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf-8'));
         }
 
         let summary = `${applied}/${edits.length} edit(s) applied`;

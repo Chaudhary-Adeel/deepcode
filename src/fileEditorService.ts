@@ -80,13 +80,15 @@ export class FileEditorService {
      * Apply edits to a document with diff preview
      */
     async applyEdits(document: vscode.TextDocument, editResult: EditResult): Promise<boolean> {
-        const editor = vscode.window.activeTextEditor;
-        if (!editor || editor.document !== document) {
-            vscode.window.showErrorMessage('No active editor for the target file.');
-            return false;
+        // Read current file content from disk (fresh, not stale)
+        let content: string;
+        try {
+            const bytes = await vscode.workspace.fs.readFile(document.uri);
+            content = Buffer.from(bytes).toString('utf-8');
+        } catch {
+            content = document.getText();
         }
 
-        const content = document.getText();
         let newContent = content;
         let appliedCount = 0;
 
@@ -108,32 +110,35 @@ export class FileEditorService {
                     appliedCount++;
                 } else {
                     vscode.window.showWarningMessage(
-                        `Could not find text to replace: "${edit.oldText.substring(0, 50)}..."`
+                        `Could not find text to replace: "${edit.oldText.substring(0, 80)}..."`
                     );
                 }
             }
         }
 
         if (appliedCount === 0) {
-            vscode.window.showErrorMessage('No edits could be applied.');
+            vscode.window.showErrorMessage(
+                `DeepCode: No edits could be applied. The file may have changed since the edit was proposed.`
+            );
             return false;
         }
 
-        // Apply the full edit
+        // Apply using WorkspaceEdit — does NOT require opening the file
+        const wsEdit = new vscode.WorkspaceEdit();
         const fullRange = new vscode.Range(
             document.positionAt(0),
             document.positionAt(content.length)
         );
-
-        const success = await editor.edit((editBuilder) => {
-            editBuilder.replace(fullRange, newContent);
-        });
+        wsEdit.replace(document.uri, fullRange, newContent);
+        const success = await vscode.workspace.applyEdit(wsEdit);
 
         if (success) {
-            // Auto-save if configured
-            const autoSave = vscode.workspace.getConfiguration('deepcode').get<boolean>('autoSave', false);
-            if (autoSave) {
-                await document.save();
+            // Always auto-save after applying edits
+            try {
+                const doc = await vscode.workspace.openTextDocument(document.uri);
+                await doc.save();
+            } catch {
+                // Non-critical — edit was applied, save failed
             }
             vscode.window.showInformationMessage(
                 `DeepCode: Applied ${appliedCount}/${editResult.edits.length} edit(s). ${editResult.explanation}`
