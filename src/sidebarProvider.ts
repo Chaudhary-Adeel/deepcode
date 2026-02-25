@@ -534,6 +534,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         try {
             const cfg = this._deepseekService.getConfig();
+            let streamedTokens = false;
 
             // Use the full agentic tool-use loop with real-time visibility
             const result = await this._subAgentService.runAgentLoop(
@@ -571,16 +572,22 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 },
                 // checkCancelled
                 () => this._isCancelled,
+                // onToken — real-time streaming of final response
+                (token) => {
+                    streamedTokens = true;
+                    this._view?.webview.postMessage({ type: 'streamToken', token });
+                },
             );
 
-            // Stream the final synthesized content to UI
-            const content = result.content;
-            const chunkSize = 20;
-            for (let i = 0; i < content.length; i += chunkSize) {
-                const chunk = content.substring(i, i + chunkSize);
-                this._view?.webview.postMessage({ type: 'streamToken', token: chunk });
-                // Small delay for smooth streaming feel
-                await new Promise(r => setTimeout(r, 10));
+            // If streaming didn't already send tokens, send the full content
+            if (!streamedTokens) {
+                const content = result.content;
+                const chunkSize = 40;
+                for (let i = 0; i < content.length; i += chunkSize) {
+                    const chunk = content.substring(i, i + chunkSize);
+                    this._view?.webview.postMessage({ type: 'streamToken', token: chunk });
+                    await new Promise(r => setTimeout(r, 5));
+                }
             }
 
             this._chatHistory.push({ role: 'assistant', content: result.content });
@@ -3114,7 +3121,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     if (data.error) {
                         addMessage('system', 'Web search failed: ' + data.error);
                     } else {
-                        addMessage('system', 'Web search for "' + escapeHtml(data.query) + '":\n' + escapeHtml(data.results));
+                        addMessage('system', 'Web search for "' + escapeHtml(data.query) + '":\\n' + escapeHtml(data.results));
                     }
                     break;
                 }

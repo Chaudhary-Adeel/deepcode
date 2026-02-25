@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as https from 'https';
 import {
     AgentLoop,
     AGENT_SYSTEM_PROMPT,
@@ -52,8 +53,8 @@ export interface OrchestratedResponse {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const MAX_ITERATIONS = 25;
-const DEFAULT_MAX_TOKENS = 8192;
+const MAX_ITERATIONS = 8;
+const DEFAULT_MAX_TOKENS = 4096;
 
 /**
  * Scout sub-agent definitions used for pre-flight parallel context gathering.
@@ -321,6 +322,7 @@ export class SubAgentService {
         onToolCall?: (toolName: string, args: Record<string, any>) => void,
         onToolResult?: (toolName: string, result: ToolCallResult) => void,
         checkCancelled?: () => boolean,
+        onToken?: (token: string) => void,
     ): Promise<AgentLoopResult> {
         const toolExecutor = new ToolExecutor();
         const contextManager = new ContextManager();
@@ -332,6 +334,7 @@ export class SubAgentService {
         // Load progressive memory for project understanding
         onStatus?.('Loading project memory...');
         const memoryContext = await memoryService.getMemoryContext();
+        const hasMemory = !!memoryContext;
 
         // Inject memory into system prompt
         let enrichedContext = workspaceContext;
@@ -361,17 +364,22 @@ export class SubAgentService {
             fullUserMessage += attachedContext;
         }
 
-        // ── Pre-flight: Spawn Scout Sub-Agents in Parallel ──────────────
-        // Before the main agent loop, dispatch multiple scouts simultaneously
-        // to explore the codebase from different angles. This gives the main
-        // agent comprehensive context from step 1.
+        // ── Smart Routing: Skip heavy machinery for simple questions ─────
+        // If the user's message is simple and we already have context (from
+        // attached files, memory, or conversation history), go straight to
+        // the agent with NO scouts and minimal iterations.
+
+        const wordCount = userMessage.split(/\s+/).length;
+        const hasAttachedContent = !!context && context.length > 100;
+        const isSimpleFollowUp = conversationHistory && conversationHistory.length > 2;
+        const isTrivial = wordCount < 12 && !userMessage.includes('file') && !userMessage.includes('code') && !userMessage.includes('edit') && !userMessage.includes('fix');
+        const isDirectQuestion = hasAttachedContent || hasMemory || isSimpleFollowUp || isTrivial;
 
         let scoutContext = '';
-        const isSimpleFollowUp = conversationHistory && conversationHistory.length > 2;
-        const isTrivial = userMessage.split(/\s+/).length < 8 && !userMessage.includes('file') && !userMessage.includes('code');
 
-        if (!isSimpleFollowUp && !isTrivial) {
-            onStatus?.('Deploying scout agents for parallel context gathering...');
+        // Only run scouts for complex first-time questions about the codebase
+        if (!isDirectQuestion && wordCount > 5) {
+            onStatus?.('Gathering context...');
 
             const scoutResults = await this.runScoutAgents(
                 apiKey,
@@ -387,20 +395,19 @@ export class SubAgentService {
             );
 
             if (scoutResults.length > 0) {
-                scoutContext = '\n\n## Pre-gathered Context from Scout Agents\n\n';
+                scoutContext = '\n\n## Pre-gathered Context\n\n';
                 for (const sr of scoutResults) {
-                    scoutContext += `### Scout: ${sr.label}\n${sr.content}\n\n`;
+                    scoutContext += `### ${sr.label}\n${sr.content}\n\n`;
                 }
             }
         }
 
-        // Prepend scout findings to the user message so the main agent
-        // starts with excellent context
+        // Prepend scout findings to the user message
         if (scoutContext) {
             fullUserMessage = `${scoutContext}\n---\n\n${fullUserMessage}`;
         }
 
-        onStatus?.('Starting main agent with full context...');
+        onStatus?.('Thinking about your request...');
 
         const agentLoop = new AgentLoop({
             apiKey,
@@ -415,6 +422,7 @@ export class SubAgentService {
             onProgress: onStatus,
             onToolCall,
             onToolResult,
+            onToken,
             checkCancelled,
         });
 
@@ -424,7 +432,6 @@ export class SubAgentService {
         // Store what we learned from this interaction so future runs start
         // with better context and use fewer tokens.
         try {
-            onStatus?.('Updating project memory...');
             await memoryService.updateFromInteraction(
                 userMessage,
                 result.content,
@@ -456,31 +463,21 @@ export class SubAgentService {
         checkCancelled?: () => boolean,
     ): Promise<Array<{ id: string; label: string; content: string; tokens: number }>> {
         const scoutPromises = SCOUT_TASKS.map(async (scout) => {
-            onStatus?.(`Scout: ${scout.label}...`);
-
-            // Report the scout as a tool call for UI visibility
-            onToolCall?.('run_subagent', { task: `[Scout] ${scout.label}` });
+            onToolCall?.('run_subagent', { task: scout.label });
 
             const toolExecutor = new ToolExecutor();
             const subAgent = new AgentLoop({
                 apiKey,
                 model,
-                systemPrompt: `You are a scout sub-agent for DeepCode. Your job is to quickly gather specific information from the codebase. Be fast, thorough, and return structured findings.
-
-Rules:
-- Use multiple tools in parallel when possible
-- Focus on breadth of coverage — gather as much relevant info as you can
-- Return findings in a clear, structured format with file paths and line numbers
-- Don't make edits — you are read-only reconnaissance
-- Be concise but complete — the main agent will use your findings to act`,
+                systemPrompt: 'You are a fast scout. Quickly gather info from the codebase using tools. Be read-only. Return concise structured findings with file paths.',
                 temperature,
                 topP,
-                maxTokens: DEFAULT_MAX_TOKENS,
-                maxIterations: 10, // Scouts are fast and focused
+                maxTokens: 2048,
+                maxIterations: 3, // Scouts: 1-2 tool calls then summarize
                 tools: SUBAGENT_TOOLS,
                 toolExecutor,
                 isSubAgent: true,
-                onProgress: (msg) => onStatus?.(`  [${scout.id}] ${msg}`),
+                onProgress: onStatus,
                 onToolCall,
                 onToolResult,
                 checkCancelled,
@@ -668,9 +665,9 @@ Rules:
                 },
             };
 
-            const req = https.request(reqOpts, (res) => {
+            const req = https.request(reqOpts, (res: any) => {
                 let data = '';
-                res.on('data', (chunk) => { data += chunk; });
+                res.on('data', (chunk: any) => { data += chunk; });
                 res.on('end', () => {
                     try {
                         const json = JSON.parse(data);
@@ -785,5 +782,18 @@ Rules:
     private truncate(text: string, maxLength: number): string {
         if (text.length <= maxLength) { return text; }
         return text.substring(0, maxLength - 3) + '...';
+    }
+
+    /**
+     * Check if two file paths refer to the same file.
+     * Handles relative vs absolute, trailing slashes, etc.
+     */
+    private pathsMatch(pathA: string, pathB: string): boolean {
+        if (!pathA || !pathB) { return false; }
+        const normalize = (p: string) =>
+            p.replace(/\\/g, '/').replace(/\/+$/g, '').toLowerCase();
+        const a = normalize(pathA);
+        const b = normalize(pathB);
+        return a === b || a.endsWith('/' + b) || b.endsWith('/' + a);
     }
 }
