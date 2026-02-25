@@ -3,7 +3,7 @@
   "displayName": "DeepCode - Coding Assistant",
   "description": "DeepSeek-powered AI coding assistant that can read, edit, and refactor files in your workspace at runtime.",
   "version": "1.0.0",
-  "publisher": "deepcode",
+  "publisher": "MuhammadAdeel",
   "repository": {
     "type": "git",
     "url": "https://github.com/Chaudhary-Adeel/deepcode"

@@ -57,6 +57,8 @@ export interface AgentLoopOptions {
     onToolCall?: (toolName: string, args: Record<string, any>) => void;
     onToolResult?: (toolName: string, result: ToolCallResult) => void;
     checkCancelled?: () => boolean;
+    /** Stream tokens for the final response in real-time */
+    onToken?: (token: string) => void;
     /** Depth guard — prevents sub-agents from spawning more sub-agents */
     isSubAgent?: boolean;
 }
@@ -80,84 +82,48 @@ export interface AgentLoopResult {
 
 // ─── Sub-Agent System Prompt ─────────────────────────────────────────────────
 
-const SUBAGENT_SYSTEM_PROMPT = `You are a focused sub-agent for DeepCode. You have been assigned a specific task by the main agent. Complete it thoroughly and quickly using the available tools.
+const SUBAGENT_SYSTEM_PROMPT = `You are a focused sub-agent. Complete your assigned task quickly using tools.
 
-## Rules
-- Stay strictly focused on your assigned task — do not deviate
-- Use tools proactively to gather information and make changes
-- Use MULTIPLE tools in PARALLEL when possible (e.g., read multiple files at once with separate read_file calls)
-- Always read files before editing to ensure accuracy
-- After making edits, verify your changes (re-read the file, check diagnostics)
-- Return a clear, structured summary of what you found or accomplished
-- Include all key details — file paths, line numbers, function names, variable names, patterns found
-- If you encounter errors, attempt to resolve them before reporting back
-- Be thorough but efficient — maximize information gathered per tool call
-- When searching, use multiple grep_search calls in parallel with different query patterns for broader coverage`;
+Rules:
+- Stay focused on your task
+- Use multiple tools in parallel when possible
+- Read files before editing
+- Return a structured summary with file paths and key findings
+- Be fast and efficient — minimize tool calls`;
 
 // ─── Main Agent System Prompt ────────────────────────────────────────────────
 
-export const AGENT_SYSTEM_PROMPT = `You are DeepCode — an expert AI coding agent embedded in VS Code. You have access to powerful tools to read, write, search, and modify code in the user's workspace. You can also run shell commands, search the web for documentation, fetch web pages, and spawn sub-agents for parallel work.
+export const AGENT_SYSTEM_PROMPT = `You are DeepCode — an expert AI coding agent in VS Code with tools to read, write, search, and modify code.
 
-## How You Work
+You think → use tools → observe → repeat until done. Be autonomous — use tools instead of asking the user.
 
-You operate in a loop: think → use tools → observe results → think → repeat until the task is complete. You are autonomous — don't ask the user for information you can look up yourself using tools.
+## Speed Rules
+- For SIMPLE questions (explanations, summaries, concepts): answer DIRECTLY from context without using tools. If you already have enough context, just respond immediately.
+- For questions about attached/open files: the content is already in the prompt — read it and answer. Do NOT re-read files you already have.
+- Only use tools when you genuinely need information not already provided.
+- Use read_file, grep_search, list_directory directly — only use run_subagent for truly complex multi-file tasks.
+- Prefer multiple tool calls in ONE response over spawning sub-agents.
+- Keep tool usage minimal — 1-3 calls for most tasks.
 
-## ⚡ MANDATORY: Always Use Sub-Agents for Parallel Work
+## Tool Strategy
+1. Check if you can answer from provided context FIRST.
+2. If not, use the fewest tools needed to get the answer.
+3. For edits: read_file → edit_file → get_diagnostics. That's it.
+4. For multi-file work: use run_subagent to parallelize.
+5. Use web_search only when workspace info is insufficient.
 
-You MUST spawn multiple run_subagent calls in your VERY FIRST response for every non-trivial task. This is not optional — parallel sub-agents are your primary advantage over sequential agents.
+## Response Quality
+- Be direct. Lead with the answer.
+- For code changes, explain what and why briefly.
+- Match existing code style.
+- NEVER mention sub-agents, scouts, tools, or internal mechanics. Present findings naturally.
 
-### When starting ANY task, immediately decompose it into parallel sub-agent calls:
+## Edit Rules
+- oldText must be verbatim from the file
+- Always read_file before edit_file
+- Include enough context for a unique match
 
-**For code understanding / questions:**
-- Sub-agent 1: Explore project structure (list_directory, search_files) and identify key files
-- Sub-agent 2: Search for relevant patterns, usages, and references (grep_search)
-- Sub-agent 3: Read the most relevant files identified by context clues in the question
-- Sub-agent 4+: Investigate additional areas mentioned or implied by the user
-
-**For code changes / edits:**
-- Sub-agent 1: Read the target file(s) and understand current implementation
-- Sub-agent 2: Search for all usages, imports, and references that might be affected
-- Sub-agent 3: Check related tests, configs, or dependent files
-- Sub-agent 4: Read documentation or type definitions relevant to the change
-
-**For debugging / error fixing:**
-- Sub-agent 1: Read the failing file and surrounding context
-- Sub-agent 2: Search for the error message or pattern across the codebase
-- Sub-agent 3: Check recent changes or related files
-- Sub-agent 4: Run diagnostics or check test output
-
-After all sub-agents report back, you have comprehensive context to produce a precise, well-informed response or make accurate edits. DO NOT attempt single-threaded sequential exploration — always fan out with sub-agents first.
-
-### Sub-Agent Rules
-- Spawn 2-6 sub-agents in a SINGLE response (they all execute in parallel)
-- Each sub-agent gets a focused, specific task with clear deliverables
-- After sub-agents complete, synthesize their findings and act
-- For multi-file edits after gathering context, spawn additional sub-agents to edit files in parallel
-- Only do sequential single-tool calls for simple follow-ups after the initial parallel sweep
-
-### Tool Usage Strategy
-1. **Fan out first.** ALWAYS start by spawning multiple sub-agents to explore, search, and read in parallel.
-2. **Synthesize.** After sub-agents report back, you have the full picture — now plan your action.
-3. **Edit surgically.** Use edit_file with precise oldText matches. Always read the file first to get exact text.
-4. **Verify always.** After edits, use get_diagnostics and/or run_command to verify correctness.
-5. **Parallelize edits.** For multi-file changes, spawn sub-agents to edit different files simultaneously.
-6. **Search the web.** Use web_search to find latest documentation, API references, or solutions. Follow up with fetch_webpage to read full pages. Do this when you need info not in the workspace.
-
-### Response Quality
-- Be direct and precise. Lead with the answer or action.
-- When making code changes, explain what you changed and why.
-- Flag any risks, side effects, or follow-up tasks.
-- Match existing code style and conventions.
-- Never hallucinate APIs or functions — use tools to verify.
-- NEVER mention sub-agents, scout agents, tool calls, or internal mechanics in your responses to the user. Present your findings as if you naturally knew them. Say "I found..." not "My sub-agents found..." or "Based on analysis from sub-agents...". The user should see a seamless, knowledgeable assistant — not the machinery behind it.
-
-### Edit Rules
-- oldText in edit_file MUST be a verbatim character-for-character substring of the file
-- Always read_file before edit_file to get the exact current content
-- Include enough context in oldText to make the match unique
-- For complex multi-file changes, use sub-agents to work on different files in parallel
-
-## Current Workspace Context
+## Workspace
 {WORKSPACE_CONTEXT}`;
 
 // ─── Agent Loop Implementation ───────────────────────────────────────────────
@@ -207,12 +173,16 @@ export class AgentLoop {
             }
 
             iteration++;
-            this.opts.onProgress?.(
-                `Thinking... (step ${iteration}/${this.opts.maxIterations})`
-            );
+            if (iteration === 1) {
+                this.opts.onProgress?.('Analyzing your request...');
+            } else {
+                this.opts.onProgress?.('Working on it...');
+            }
 
-            // Call DeepSeek API with tools
-            const response = await this.callAPI();
+            // Call DeepSeek API — stream tokens after first iteration
+            // (first call likely returns tool calls; subsequent calls more likely to answer)
+            const shouldStream = iteration > 1 && !!this.opts.onToken;
+            const response = await this.callAPI(shouldStream);
             this.totalTokens += response.tokens;
 
             const message = response.message;
@@ -228,12 +198,7 @@ export class AgentLoop {
 
                 // Execute all tool calls in parallel
                 const toolCount = message.tool_calls.length;
-                const toolNames = message.tool_calls
-                    .map((tc) => tc.function.name)
-                    .join(', ');
-                this.opts.onProgress?.(
-                    `Running ${toolCount} tool(s): ${toolNames}`
-                );
+                this.opts.onProgress?.(this.describeToolActions(message.tool_calls));
 
                 const toolResults = await Promise.all(
                     message.tool_calls.map(async (tc) => {
@@ -291,7 +256,6 @@ export class AgentLoop {
                 }
             } else {
                 // No tool calls — model returned a final text response
-                this.opts.onProgress?.('Done');
                 return {
                     content: message.content || '',
                     totalTokens: this.totalTokens,
@@ -303,7 +267,7 @@ export class AgentLoop {
         }
 
         // Exceeded max iterations
-        this.opts.onProgress?.('Max iterations reached');
+        this.opts.onProgress?.('Wrapping up...');
         return {
             content:
                 'I reached the maximum number of tool-use iterations for this task. ' +
@@ -315,10 +279,91 @@ export class AgentLoop {
         };
     }
 
+    // ─── Natural Language Descriptions ───────────────────────────────────
+
+    /**
+     * Generate a natural, user-friendly description of what tools are being used.
+     */
+    private describeToolActions(toolCalls: ToolCall[]): string {
+        if (toolCalls.length === 1) {
+            return this.describeOneTool(toolCalls[0]);
+        }
+
+        // Group by type for a clean summary
+        const names = toolCalls.map(tc => tc.function.name);
+        const uniqueNames = [...new Set(names)];
+
+        if (uniqueNames.length === 1) {
+            const name = uniqueNames[0];
+            if (name === 'read_file') { return `Reading ${toolCalls.length} files...`; }
+            if (name === 'grep_search') { return 'Searching across the codebase...'; }
+            if (name === 'run_subagent') { return 'Investigating multiple areas in parallel...'; }
+        }
+
+        // Mixed tools — describe the dominant action
+        const hasSearch = names.some(n => n === 'grep_search' || n === 'search_files');
+        const hasRead = names.some(n => n === 'read_file');
+        const hasEdit = names.some(n => n === 'edit_file' || n === 'write_file');
+        const hasSubAgent = names.some(n => n === 'run_subagent');
+
+        if (hasSubAgent) { return 'Investigating multiple areas in parallel...'; }
+        if (hasEdit) { return 'Applying changes...'; }
+        if (hasSearch && hasRead) { return 'Searching and reading relevant files...'; }
+        if (hasSearch) { return 'Searching the codebase...'; }
+        if (hasRead) { return `Reading ${names.filter(n => n === 'read_file').length} files...`; }
+
+        return 'Working on it...';
+    }
+
+    private describeOneTool(tc: ToolCall): string {
+        let args: Record<string, any> = {};
+        try { args = JSON.parse(tc.function.arguments); } catch { /* */ }
+
+        switch (tc.function.name) {
+            case 'read_file': {
+                const file = args.path || '';
+                return `Reading ${file}...`;
+            }
+            case 'write_file': {
+                const file = args.path || '';
+                return `Writing ${file}...`;
+            }
+            case 'edit_file': {
+                const file = args.path || '';
+                return `Editing ${file}...`;
+            }
+            case 'list_directory': {
+                const dir = args.path || 'project';
+                return `Exploring ${dir === '.' || dir === '' ? 'project structure' : dir}...`;
+            }
+            case 'search_files':
+                return `Searching for files matching "${args.pattern || ''}"...`;
+            case 'grep_search':
+                return `Searching for "${(args.query || '').substring(0, 50)}"...`;
+            case 'run_command': {
+                const cmd = (args.command || '').substring(0, 40);
+                return `Running: ${cmd}...`;
+            }
+            case 'get_diagnostics':
+                return 'Checking for errors...';
+            case 'web_search':
+                return `Searching the web for "${(args.query || '').substring(0, 50)}"...`;
+            case 'fetch_webpage':
+                return 'Reading documentation...';
+            case 'run_subagent': {
+                const task = (args.task || '').substring(0, 60);
+                return `Working on: ${task}...`;
+            }
+            default:
+                return 'Working on it...';
+        }
+    }
+
     // ─── Sub-Agent Spawning ──────────────────────────────────────────────
 
     private async runSubAgent(task: string, context: string): Promise<string> {
-        this.opts.onProgress?.(`Spawning sub-agent: ${task.substring(0, 60)}...`);
+        const shortTask = task.length > 60 ? task.substring(0, 60) + '...' : task;
+        this.opts.onProgress?.(`Working on: ${shortTask}`);
 
         const subAgent = new AgentLoop({
             apiKey: this.opts.apiKey,
@@ -327,12 +372,12 @@ export class AgentLoop {
             temperature: this.opts.temperature,
             topP: this.opts.topP,
             maxTokens: this.opts.maxTokens,
-            maxIterations: 15, // Shorter limit for sub-agents
+            maxIterations: 5, // Sub-agents must be fast
             tools: SUBAGENT_TOOLS,
             toolExecutor: this.opts.toolExecutor,
             isSubAgent: true,
             onProgress: (msg) =>
-                this.opts.onProgress?.(`  [sub-agent] ${msg}`),
+                this.opts.onProgress?.(msg),
             onToolCall: this.opts.onToolCall,
             onToolResult: this.opts.onToolResult,
             checkCancelled: this.opts.checkCancelled,
@@ -366,7 +411,7 @@ export class AgentLoop {
 
     // ─── DeepSeek API Call ───────────────────────────────────────────────
 
-    private callAPI(): Promise<{
+    private callAPI(streamTokens: boolean = false): Promise<{
         message: {
             content: string | null;
             tool_calls?: ToolCall[];
@@ -374,6 +419,8 @@ export class AgentLoop {
         tokens: number;
     }> {
         return new Promise((resolve, reject) => {
+            const useStream = streamTokens && !!this.opts.onToken;
+
             // Build the request body
             const bodyObj: Record<string, any> = {
                 model: this.opts.model,
@@ -393,7 +440,7 @@ export class AgentLoop {
                 temperature: this.opts.temperature,
                 max_tokens: this.opts.maxTokens,
                 top_p: this.opts.topP,
-                stream: false,
+                stream: useStream,
             };
 
             // Only include tools if available
@@ -417,44 +464,109 @@ export class AgentLoop {
             };
 
             const req = https.request(reqOpts, (res) => {
-                let data = '';
-                res.on('data', (chunk) => {
-                    data += chunk;
-                });
-                res.on('end', () => {
-                    try {
-                        if (res.statusCode !== 200) {
-                            let errMsg = `API error: ${res.statusCode}`;
+                if (useStream) {
+                    // ── SSE streaming mode ──
+                    let contentAccum = '';
+                    let toolCallsAccum: ToolCall[] = [];
+                    let totalTokens = 0;
+                    let buffer = '';
+
+                    res.on('data', (chunk: Buffer) => {
+                        buffer += chunk.toString();
+                        const lines = buffer.split('\n');
+                        buffer = lines.pop() || ''; // keep incomplete line
+
+                        for (const line of lines) {
+                            const trimmed = line.trim();
+                            if (!trimmed.startsWith('data: ')) { continue; }
+                            const payload = trimmed.slice(6);
+                            if (payload === '[DONE]') { continue; }
+
                             try {
-                                const err = JSON.parse(data);
-                                errMsg = err.error?.message || errMsg;
-                            } catch {
-                                /* use default message */
-                            }
-                            reject(new Error(errMsg));
-                            return;
-                        }
+                                const json = JSON.parse(payload);
+                                const delta = json.choices?.[0]?.delta;
+                                if (!delta) { continue; }
 
-                        const json = JSON.parse(data);
-                        const choice = json.choices?.[0];
-                        if (!choice) {
-                            reject(new Error('No choices in API response'));
-                            return;
-                        }
+                                // Content tokens
+                                if (delta.content) {
+                                    contentAccum += delta.content;
+                                    this.opts.onToken?.(delta.content);
+                                }
 
+                                // Tool call deltas
+                                if (delta.tool_calls) {
+                                    for (const tc of delta.tool_calls) {
+                                        const idx = tc.index ?? 0;
+                                        if (!toolCallsAccum[idx]) {
+                                            toolCallsAccum[idx] = {
+                                                id: tc.id || '',
+                                                type: 'function',
+                                                function: { name: '', arguments: '' },
+                                            };
+                                        }
+                                        if (tc.id) { toolCallsAccum[idx].id = tc.id; }
+                                        if (tc.function?.name) { toolCallsAccum[idx].function.name += tc.function.name; }
+                                        if (tc.function?.arguments) { toolCallsAccum[idx].function.arguments += tc.function.arguments; }
+                                    }
+                                }
+
+                                // Usage in final chunk
+                                if (json.usage) {
+                                    totalTokens = json.usage.total_tokens || 0;
+                                }
+                            } catch { /* skip malformed SSE */ }
+                        }
+                    });
+
+                    res.on('end', () => {
+                        const hasToolCalls = toolCallsAccum.length > 0 && toolCallsAccum.some(tc => tc.function.name);
                         resolve({
                             message: {
-                                content: choice.message?.content || null,
-                                tool_calls: choice.message?.tool_calls,
+                                content: contentAccum || null,
+                                tool_calls: hasToolCalls ? toolCallsAccum : undefined,
                             },
-                            tokens: json.usage?.total_tokens || 0,
+                            tokens: totalTokens,
                         });
-                    } catch (e) {
-                        reject(
-                            new Error(`Failed to parse API response: ${e}`)
-                        );
-                    }
-                });
+                    });
+
+                    res.on('error', (e) => reject(new Error(`Stream error: ${e.message}`)));
+                } else {
+                    // ── Non-streaming mode ──
+                    let data = '';
+                    res.on('data', (chunk) => {
+                        data += chunk;
+                    });
+                    res.on('end', () => {
+                        try {
+                            if (res.statusCode !== 200) {
+                                let errMsg = `API error: ${res.statusCode}`;
+                                try {
+                                    const err = JSON.parse(data);
+                                    errMsg = err.error?.message || errMsg;
+                                } catch { /* use default */ }
+                                reject(new Error(errMsg));
+                                return;
+                            }
+
+                            const json = JSON.parse(data);
+                            const choice = json.choices?.[0];
+                            if (!choice) {
+                                reject(new Error('No choices in API response'));
+                                return;
+                            }
+
+                            resolve({
+                                message: {
+                                    content: choice.message?.content || null,
+                                    tool_calls: choice.message?.tool_calls,
+                                },
+                                tokens: json.usage?.total_tokens || 0,
+                            });
+                        } catch (e) {
+                            reject(new Error(`Failed to parse API response: ${e}`));
+                        }
+                    });
+                }
             });
 
             req.on('error', (e) =>
