@@ -142,6 +142,56 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     {
         type: 'function',
         function: {
+            name: 'multi_edit_files',
+            description:
+                'Make edits across MULTIPLE files in a single tool call. ' +
+                'More efficient than calling edit_file repeatedly. ' +
+                'Each entry specifies a file path and an array of find-and-replace edits. ' +
+                'All edits are applied sequentially. Failed edits are reported but do not block others. ' +
+                'After applying, diagnostics are automatically checked and included in the result.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    files: {
+                        type: 'array',
+                        description: 'Array of file edit operations',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                path: {
+                                    type: 'string',
+                                    description: 'Relative path to the file from workspace root',
+                                },
+                                edits: {
+                                    type: 'array',
+                                    description: 'Array of find-and-replace edits for this file',
+                                    items: {
+                                        type: 'object',
+                                        properties: {
+                                            oldText: {
+                                                type: 'string',
+                                                description: 'Exact text to find (must be verbatim)',
+                                            },
+                                            newText: {
+                                                type: 'string',
+                                                description: 'Text to replace oldText with',
+                                            },
+                                        },
+                                        required: ['oldText', 'newText'],
+                                    },
+                                },
+                            },
+                            required: ['path', 'edits'],
+                        },
+                    },
+                },
+                required: ['files'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
             name: 'list_directory',
             description:
                 'List the contents of a directory. Returns file and folder names ' +
@@ -374,6 +424,8 @@ export class ToolExecutor {
                     return await this.writeFile(args.path, args.content);
                 case 'edit_file':
                     return await this.editFile(args.path, args.edits || []);
+                case 'multi_edit_files':
+                    return await this.multiEditFiles(args.files || []);
                 case 'list_directory':
                     return await this.listDirectory(args.path || '.', args.recursive || false);
                 case 'search_files':
@@ -449,6 +501,12 @@ export class ToolExecutor {
     // ─── write_file ──────────────────────────────────────────────────────
 
     private async writeFile(filePath: string, content: string): Promise<ToolCallResult> {
+        if (!filePath) {
+            return { success: false, output: 'write_file failed: "path" argument is required but was undefined or empty. Please provide a valid file path.' };
+        }
+        if (content === undefined || content === null) {
+            return { success: false, output: `write_file failed for "${filePath}": "content" argument is required but was undefined. Please provide the file content.` };
+        }
         const fullPath = this.resolvePath(filePath);
         const uri = vscode.Uri.file(fullPath);
 
@@ -487,11 +545,22 @@ export class ToolExecutor {
         filePath: string,
         edits: Array<{ oldText: string; newText: string }>
     ): Promise<ToolCallResult> {
+        if (!filePath) {
+            return { success: false, output: 'edit_file failed: "path" argument is required but was undefined or empty. Please provide a valid file path.' };
+        }
+        if (!edits || !Array.isArray(edits) || edits.length === 0) {
+            return { success: false, output: `edit_file failed for "${filePath}": "edits" argument must be a non-empty array of {oldText, newText} objects.` };
+        }
         const fullPath = this.resolvePath(filePath);
         const uri = vscode.Uri.file(fullPath);
 
         // Read current content
-        const contentBytes = await vscode.workspace.fs.readFile(uri);
+        let contentBytes: Uint8Array;
+        try {
+            contentBytes = await vscode.workspace.fs.readFile(uri);
+        } catch (readErr: any) {
+            return { success: false, output: `edit_file failed: could not read "${filePath}": ${readErr.message}. Does the file exist?` };
+        }
         let content = Buffer.from(contentBytes).toString('utf-8');
 
         let appliedCount = 0;
@@ -545,7 +614,166 @@ export class ToolExecutor {
                 '\n\nHint: oldText must be an EXACT verbatim substring. Read the file again to get precise text.';
         }
 
+        // Auto-check diagnostics after edits to enable progressive error fixing
+        if (appliedCount > 0) {
+            const diagResult = await this.getFileDiagnosticsQuick(filePath);
+            if (diagResult) {
+                output += `\n\n--- Auto-diagnostics for ${filePath} ---\n${diagResult}`;
+                output += '\nIf there are errors above, fix them now with another edit_file call.';
+            }
+        }
+
         return { success: appliedCount > 0, output };
+    }
+
+    // ─── multi_edit_files ────────────────────────────────────────────────
+
+    private async multiEditFiles(
+        files: Array<{ path: string; edits: Array<{ oldText: string; newText: string }> }>
+    ): Promise<ToolCallResult> {
+        if (!files || !Array.isArray(files) || files.length === 0) {
+            return {
+                success: false,
+                output: 'multi_edit_files failed: "files" must be a non-empty array of {path, edits[]} objects.',
+            };
+        }
+
+        const results: string[] = [];
+        let totalApplied = 0;
+        let totalFailed = 0;
+        const editedPaths: string[] = [];
+
+        for (const file of files) {
+            if (!file.path) {
+                results.push(`⚠ Skipped entry with missing path`);
+                totalFailed++;
+                continue;
+            }
+            if (!file.edits || !Array.isArray(file.edits) || file.edits.length === 0) {
+                results.push(`⚠ ${file.path}: no edits provided, skipped`);
+                totalFailed++;
+                continue;
+            }
+
+            try {
+                const editResult = await this.editFileSingle(file.path, file.edits);
+                results.push(`${file.path}: ${editResult.summary}`);
+                totalApplied += editResult.applied;
+                totalFailed += editResult.failed;
+                if (editResult.applied > 0) {
+                    editedPaths.push(file.path);
+                }
+            } catch (err: any) {
+                results.push(`${file.path}: ERROR — ${err.message}`);
+                totalFailed += file.edits.length;
+            }
+        }
+
+        let output = `Multi-file edit: ${totalApplied} applied, ${totalFailed} failed across ${files.length} file(s)\n\n`;
+        output += results.join('\n');
+
+        // Auto-check diagnostics for all edited files
+        if (editedPaths.length > 0) {
+            const diagParts: string[] = [];
+            for (const p of editedPaths) {
+                const diag = await this.getFileDiagnosticsQuick(p);
+                if (diag) {
+                    diagParts.push(`${p}:\n${diag}`);
+                }
+            }
+            if (diagParts.length > 0) {
+                output += `\n\n--- Auto-diagnostics ---\n${diagParts.join('\n')}`;
+                output += '\nIf there are errors above, fix them now with another edit call.';
+            }
+        }
+
+        return { success: totalApplied > 0, output };
+    }
+
+    /**
+     * Internal single-file edit helper that returns granular counts — used by multiEditFiles.
+     */
+    private async editFileSingle(
+        filePath: string,
+        edits: Array<{ oldText: string; newText: string }>
+    ): Promise<{ applied: number; failed: number; summary: string }> {
+        const fullPath = this.resolvePath(filePath);
+        const uri = vscode.Uri.file(fullPath);
+
+        let contentBytes: Uint8Array;
+        try {
+            contentBytes = await vscode.workspace.fs.readFile(uri);
+        } catch (readErr: any) {
+            throw new Error(`could not read file: ${readErr.message}`);
+        }
+        let content = Buffer.from(contentBytes).toString('utf-8');
+
+        let applied = 0;
+        const failures: string[] = [];
+
+        for (const edit of edits) {
+            if (!edit.oldText && edit.newText) {
+                content += '\n' + edit.newText;
+                applied++;
+            } else if (content.includes(edit.oldText)) {
+                content = content.replace(edit.oldText, edit.newText);
+                applied++;
+            } else {
+                const trimmedOld = edit.oldText.trim();
+                if (trimmedOld && content.includes(trimmedOld)) {
+                    content = content.replace(trimmedOld, edit.newText.trim());
+                    applied++;
+                } else {
+                    failures.push(edit.oldText.substring(0, 60) + (edit.oldText.length > 60 ? '...' : ''));
+                }
+            }
+        }
+
+        if (applied > 0) {
+            const doc = await vscode.workspace.openTextDocument(uri);
+            const editor = await vscode.window.showTextDocument(doc, {
+                preview: false,
+                preserveFocus: true,
+            });
+            const fullRange = new vscode.Range(
+                doc.positionAt(0),
+                doc.positionAt(doc.getText().length)
+            );
+            await editor.edit((editBuilder) => {
+                editBuilder.replace(fullRange, content);
+            });
+        }
+
+        let summary = `${applied}/${edits.length} edit(s) applied`;
+        if (failures.length > 0) {
+            summary += ` | not found: ${failures.map(f => `"${f}"`).join(', ')}`;
+        }
+
+        return { applied, failed: failures.length, summary };
+    }
+
+    /**
+     * Quick diagnostics check for a single file — returns error/warning text or null if clean.
+     */
+    private async getFileDiagnosticsQuick(filePath: string): Promise<string | null> {
+        try {
+            const fullPath = this.resolvePath(filePath);
+            const uri = vscode.Uri.file(fullPath);
+            // Wait briefly for diagnostics to update after edits
+            await new Promise(r => setTimeout(r, 500));
+            const diags = vscode.languages.getDiagnostics(uri);
+            const errors = diags.filter(
+                d => d.severity === vscode.DiagnosticSeverity.Error ||
+                     d.severity === vscode.DiagnosticSeverity.Warning
+            );
+            if (errors.length === 0) { return null; }
+            return errors.map(d => {
+                const sev = d.severity === vscode.DiagnosticSeverity.Error ? 'ERROR' : 'WARN';
+                return `  Line ${d.range.start.line + 1}: [${sev}] ${d.message}`;
+            }).join('\n');
+        } catch {
+            return null;
+        }
     }
 
     // ─── list_directory ──────────────────────────────────────────────────
