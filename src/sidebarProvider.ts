@@ -811,9 +811,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 explanation: editResult.explanation,
                 agentsUsed: result.agentsUsed,
                 edits: editResult.edits.map(e => ({
-                    oldText: e.oldText.substring(0, 120),
-                    newText: e.newText.substring(0, 120),
+                    oldText: e.oldText,
+                    newText: e.newText,
                 })),
+                language: targetFileName.split('.').pop() || '',
             });
         } catch (error: any) {
             this._view?.webview.postMessage({
@@ -1204,13 +1205,79 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             background: var(--vscode-textCodeBlock-background);
             border: 1px solid var(--vscode-editorGroup-border, transparent);
             border-radius: 3px;
-            padding: 6px 8px;
+            padding: 0;
             margin-bottom: 10px;
             font-family: var(--dc-editor-font);
             font-size: var(--dc-editor-font-size);
             overflow-x: auto;
-            max-height: 120px;
+            max-height: 300px;
             overflow-y: auto;
+        }
+
+        .diff-header {
+            padding: 4px 8px;
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+            background: var(--vscode-editor-inactiveSelectionBackground, rgba(255,255,255,0.04));
+            border-bottom: 1px solid var(--vscode-editorGroup-border, transparent);
+            font-family: var(--dc-editor-font);
+        }
+
+        .diff-line {
+            display: flex;
+            line-height: 1.6;
+            min-height: 18px;
+        }
+
+        .diff-line-num {
+            display: inline-block;
+            min-width: 32px;
+            padding: 0 6px;
+            text-align: right;
+            color: var(--vscode-editorLineNumber-foreground, #858585);
+            user-select: none;
+            flex-shrink: 0;
+            font-size: var(--dc-editor-font-size);
+        }
+
+        .diff-line-sign {
+            display: inline-block;
+            width: 14px;
+            text-align: center;
+            flex-shrink: 0;
+            user-select: none;
+            font-weight: 700;
+        }
+
+        .diff-line-content {
+            flex: 1;
+            padding-right: 8px;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+
+        .diff-line.diff-added {
+            background: var(--vscode-diffEditor-insertedLineBackground, rgba(115, 201, 145, 0.15));
+        }
+
+        .diff-line.diff-added .diff-line-sign {
+            color: var(--vscode-gitDecoration-addedResourceForeground, #73c991);
+        }
+
+        .diff-line.diff-removed {
+            background: var(--vscode-diffEditor-removedLineBackground, rgba(244, 71, 71, 0.15));
+        }
+
+        .diff-line.diff-removed .diff-line-sign {
+            color: var(--vscode-gitDecoration-deletedResourceForeground, #f44747);
+        }
+
+        .diff-line.diff-context {
+            background: transparent;
+        }
+
+        .diff-line.diff-context .diff-line-sign {
+            color: transparent;
         }
 
         .diff-old {
@@ -1221,6 +1288,44 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         .diff-new {
             color: var(--vscode-gitDecoration-addedResourceForeground, #73c991);
+        }
+
+        /* ── Code syntax highlighting tokens ──────────── */
+        .tok-keyword { color: var(--vscode-debugTokenExpression-name, #569cd6); }
+        .tok-string { color: var(--vscode-debugTokenExpression-string, #ce9178); }
+        .tok-number { color: var(--vscode-debugTokenExpression-number, #b5cea8); }
+        .tok-comment { color: var(--vscode-editorLineNumber-foreground, #6a9955); font-style: italic; }
+        .tok-function { color: var(--vscode-symbolIcon-functionForeground, #dcdcaa); }
+        .tok-type { color: var(--vscode-symbolIcon-classForeground, #4ec9b0); }
+        .tok-operator { color: var(--vscode-foreground); }
+        .tok-punctuation { color: var(--vscode-foreground); }
+        .tok-property { color: var(--vscode-symbolIcon-propertyForeground, #9cdcfe); }
+        .tok-builtin { color: var(--vscode-debugTokenExpression-name, #4fc1ff); }
+        .tok-tag { color: var(--vscode-debugTokenExpression-name, #569cd6); }
+        .tok-attr-name { color: var(--vscode-symbolIcon-propertyForeground, #9cdcfe); }
+        .tok-attr-value { color: var(--vscode-debugTokenExpression-string, #ce9178); }
+
+        .code-block-wrapper {
+            position: relative;
+        }
+
+        .code-lang-label {
+            position: absolute;
+            top: 0;
+            right: 0;
+            padding: 1px 8px;
+            font-size: 10px;
+            color: var(--vscode-descriptionForeground);
+            background: var(--vscode-editor-inactiveSelectionBackground, rgba(255,255,255,0.06));
+            border-bottom-left-radius: 3px;
+            font-family: var(--dc-font-family);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            user-select: none;
+        }
+
+        .code-block-wrapper pre {
+            margin: 0;
         }
 
         .edit-proposal-actions {
@@ -1690,14 +1795,36 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
 
         .tool-call-icon {
-            font-size: 12px;
             flex-shrink: 0;
             width: 16px;
-            text-align: center;
+            height: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--vscode-descriptionForeground);
         }
 
-        .tool-call-icon.spinning {
-            animation: spin 0.8s linear infinite;
+        .tool-call-icon svg {
+            width: 14px;
+            height: 14px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 1.5;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .tool-call-icon.spinning svg {
+            animation: spin 1s linear infinite;
+            color: var(--vscode-textLink-foreground);
+        }
+
+        .tool-call-icon.tool-call-status-success {
+            color: var(--vscode-testing-iconPassed, #73c991);
+        }
+
+        .tool-call-icon.tool-call-status-fail {
+            color: var(--vscode-testing-iconFailed, #f14c4c);
         }
 
         .tool-call-name {
@@ -1717,8 +1844,22 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         .tool-call-chevron {
             flex-shrink: 0;
             color: var(--vscode-descriptionForeground);
-            font-size: 10px;
+            width: 12px;
+            height: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
             transition: transform 0.15s;
+        }
+
+        .tool-call-chevron svg {
+            width: 10px;
+            height: 10px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
         }
 
         .tool-call-block.expanded .tool-call-chevron {
@@ -1743,13 +1884,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             display: block;
         }
 
-        .tool-call-status-success {
-            color: var(--vscode-testing-iconPassed, #73c991);
-        }
-
-        .tool-call-status-fail {
-            color: var(--vscode-testing-iconFailed, #f14c4c);
-        }
+        /* (tool status colors are on .tool-call-icon above) */
 
         .subagent-block {
             border-left: 2px solid var(--vscode-textLink-foreground);
@@ -2730,9 +2865,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (!text) return '';
             // Escape HTML first
             let s = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-            // Code blocks (fenced)
+            // Code blocks (fenced) — with syntax highlighting
             s = s.replace(/\`\`\`(\\w*)?\\n?([\\s\\S]*?)\`\`\`/g, function(m, lang, code) {
-                return '<pre><code>' + code.trim() + '</code></pre>';
+                const langLabel = lang ? '<span class="code-lang-label">' + lang + '</span>' : '';
+                const highlighted = highlightCode(code.trim(), lang || '');
+                return '<div class="code-block-wrapper">' + langLabel + '<pre><code>' + highlighted + '</code></pre></div>';
             });
             // Inline code
             s = s.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
@@ -2741,6 +2878,308 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             // Italic
             s = s.replace(/\\*(.+?)\\*/g, '<em>$1</em>');
             return s;
+        }
+
+        // ── Syntax Highlighting ────────────────────────────
+        function highlightCode(code, lang) {
+            // Already HTML-escaped
+            lang = (lang || '').toLowerCase();
+            // Map aliases
+            var langMap = {
+                js: 'javascript', ts: 'typescript', jsx: 'javascript', tsx: 'typescript',
+                py: 'python', rb: 'ruby', rs: 'rust', go: 'go', sh: 'bash',
+                bash: 'bash', zsh: 'bash', shell: 'bash', yml: 'yaml', yaml: 'yaml',
+                md: 'markdown', json: 'json', html: 'html', xml: 'html',
+                css: 'css', scss: 'css', less: 'css', sql: 'sql',
+                c: 'c', cpp: 'c', h: 'c', java: 'java', cs: 'java', swift: 'java',
+                kt: 'java', kotlin: 'java', php: 'php',
+            };
+            lang = langMap[lang] || lang;
+
+            var rules = getLanguageRules(lang);
+            if (!rules || rules.length === 0) return code;
+
+            return applyHighlighting(code, rules);
+        }
+
+        function getLanguageRules(lang) {
+            // Each rule: [regex, tokenClass]
+            // Order matters — first match wins per position
+
+            var commentLine = [/\/\/[^\\n]*/g, 'tok-comment'];
+            var commentBlock = [/\\/\\*[\\s\\S]*?\\*\\//g, 'tok-comment'];
+            var commentHash = [/#[^\\n]*/g, 'tok-comment'];
+            var commentDash = [/--[^\\n]*/g, 'tok-comment'];
+            var strDouble = [/&quot;(?:[^&]|&(?!quot;))*?&quot;/g, 'tok-string'];
+            var strSingle = [/&#39;(?:[^&]|&(?!#39;))*?&#39;/g, 'tok-string'];
+            var strBacktick = [/\`(?:[^\`])*?\`/g, 'tok-string'];
+            var strTriDouble = [/&quot;&quot;&quot;[\\s\\S]*?&quot;&quot;&quot;/g, 'tok-string'];
+            var strTriSingle = [/&#39;&#39;&#39;[\\s\\S]*?&#39;&#39;&#39;/g, 'tok-string'];
+            var numbers = [/\\b\\d+\\.?\\d*(?:e[+-]?\\d+)?\\b/gi, 'tok-number'];
+            var hexNumbers = [/\\b0x[\\da-f]+\\b/gi, 'tok-number'];
+
+            var jsKeywords = [/\\b(?:const|let|var|function|return|if|else|for|while|do|switch|case|break|continue|new|this|class|extends|import|export|from|default|try|catch|finally|throw|async|await|yield|of|in|typeof|instanceof|void|delete|super|static|get|set|constructor)\\b/g, 'tok-keyword'];
+            var jsTypes = [/\\b(?:string|number|boolean|object|any|void|null|undefined|never|unknown|Array|Map|Set|Promise|Record|Partial|Required|Readonly|Pick|Omit|Exclude|Extract)\\b/g, 'tok-type'];
+            var jsBuiltins = [/\\b(?:console|window|document|Math|JSON|Object|Array|String|Number|Boolean|RegExp|Date|Error|Promise|setTimeout|setInterval|parseInt|parseFloat|isNaN|isFinite|encodeURIComponent|decodeURIComponent|require|module|exports|process|Buffer|global)\\b/g, 'tok-builtin'];
+            var jsFuncCall = [/\\b([a-zA-Z_$][\\w$]*)\\s*(?=\\()/g, 'tok-function'];
+
+            var pyKeywords = [/\\b(?:def|class|return|if|elif|else|for|while|break|continue|pass|import|from|as|try|except|finally|raise|with|yield|lambda|and|or|not|in|is|True|False|None|async|await|global|nonlocal|assert|del)\\b/g, 'tok-keyword'];
+            var pyTypes = [/\\b(?:int|float|str|bool|list|dict|tuple|set|bytes|type|object|None)\\b/g, 'tok-type'];
+            var pyBuiltins = [/\\b(?:print|len|range|enumerate|zip|map|filter|sorted|reversed|isinstance|issubclass|hasattr|getattr|setattr|super|property|staticmethod|classmethod|open|input|format|abs|max|min|sum|round|chr|ord|hex|bin|oct|id|hash|repr|eval|exec|compile|dir|vars|locals|globals|type|iter|next)\\b/g, 'tok-builtin'];
+            var pyDecorator = [/@[a-zA-Z_][\\w.]*/g, 'tok-keyword'];
+            var pyFuncCall = [/\\b([a-zA-Z_][\\w]*)\\s*(?=\\()/g, 'tok-function'];
+
+            var htmlTags = [/&lt;\\/?(\\w+)/g, 'tok-tag'];
+            var htmlAttrName = [/\\s([a-zA-Z\\-]+)(?==)/g, 'tok-attr-name'];
+
+            var cssKeywords = [/\\b(?:import|media|keyframes|font-face|supports|charset)\\b/g, 'tok-keyword'];
+            var cssProp = [/([a-z\\-]+)\\s*(?=:)/g, 'tok-property'];
+            var cssVal = [/:\\s*([^;{}]+)/g, 'tok-attr-value'];
+            var cssSelector = [/^\\s*([.#]?[a-zA-Z][\\w\\-*.#>+~, ]+)\\s*\\{/gm, 'tok-tag'];
+
+            var jsonKey = [/&quot;([^&]*?)&quot;\\s*(?=:)/g, 'tok-property'];
+            var jsonStr = [/:\\s*&quot;([^&]*?)&quot;/g, 'tok-string'];
+            var jsonBool = [/\\b(?:true|false|null)\\b/g, 'tok-keyword'];
+
+            var sqlKeywords = [/\\b(?:SELECT|FROM|WHERE|INSERT|INTO|UPDATE|SET|DELETE|CREATE|DROP|ALTER|TABLE|INDEX|VIEW|JOIN|LEFT|RIGHT|INNER|OUTER|ON|AND|OR|NOT|IN|IS|NULL|AS|ORDER|BY|GROUP|HAVING|LIMIT|OFFSET|UNION|ALL|DISTINCT|COUNT|SUM|AVG|MIN|MAX|BETWEEN|LIKE|EXISTS|CASE|WHEN|THEN|ELSE|END|BEGIN|COMMIT|ROLLBACK|GRANT|REVOKE|PRIMARY|KEY|FOREIGN|REFERENCES|CONSTRAINT|DEFAULT|VALUES|TRUNCATE|CASCADE)\\b/gi, 'tok-keyword'];
+
+            var bashKeywords = [/\\b(?:if|then|else|elif|fi|for|while|do|done|case|esac|in|function|return|local|export|source|echo|exit|set|unset|readonly|declare|typeset|shift|trap|eval|exec|test|cd|ls|mv|cp|rm|mkdir|chmod|chown|grep|sed|awk|cat|head|tail|sort|uniq|wc|find|xargs|curl|wget|tar|git|npm|yarn|pip|docker|sudo)\\b/g, 'tok-keyword'];
+            var bashVar = [/\\$[a-zA-Z_][\\w]*/g, 'tok-property'];
+            var bashVar2 = [/\\$\\{[^}]+\\}/g, 'tok-property'];
+
+            var rustKeywords = [/\\b(?:fn|let|mut|const|struct|enum|impl|trait|pub|use|mod|crate|self|super|match|if|else|for|while|loop|break|continue|return|where|as|in|ref|move|async|await|unsafe|extern|type|dyn|static|macro_rules)\\b/g, 'tok-keyword'];
+            var rustTypes = [/\\b(?:i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize|f32|f64|bool|char|str|String|Vec|Option|Result|Box|Rc|Arc|Cell|RefCell|HashMap|HashSet|BTreeMap|BTreeSet)\\b/g, 'tok-type'];
+
+            var goKeywords = [/\\b(?:func|var|const|type|struct|interface|map|chan|package|import|return|if|else|for|range|switch|case|default|break|continue|go|defer|select|fallthrough|goto)\\b/g, 'tok-keyword'];
+            var goTypes = [/\\b(?:int|int8|int16|int32|int64|uint|uint8|uint16|uint32|uint64|float32|float64|complex64|complex128|string|bool|byte|rune|error|any)\\b/g, 'tok-type'];
+            var goBuiltins = [/\\b(?:make|len|cap|append|copy|delete|new|close|panic|recover|print|println|nil|true|false|iota)\\b/g, 'tok-builtin'];
+
+            switch (lang) {
+                case 'javascript':
+                case 'typescript':
+                    return [commentBlock, commentLine, strBacktick, strDouble, strSingle, hexNumbers, numbers, jsTypes, jsKeywords, jsBuiltins, jsFuncCall];
+                case 'python':
+                    return [strTriDouble, strTriSingle, commentHash, strDouble, strSingle, hexNumbers, numbers, pyDecorator, pyTypes, pyKeywords, pyBuiltins, pyFuncCall];
+                case 'html':
+                    return [commentBlock, strDouble, strSingle, htmlTags, htmlAttrName];
+                case 'css':
+                    return [commentBlock, strDouble, strSingle, numbers, cssKeywords, cssSelector, cssProp, cssVal];
+                case 'json':
+                    return [jsonKey, jsonStr, hexNumbers, numbers, jsonBool];
+                case 'sql':
+                    return [commentDash, commentBlock, strSingle, numbers, sqlKeywords];
+                case 'bash':
+                    return [commentHash, strDouble, strSingle, numbers, bashVar2, bashVar, bashKeywords];
+                case 'rust':
+                    return [commentBlock, commentLine, strDouble, strSingle, hexNumbers, numbers, rustTypes, rustKeywords, jsFuncCall];
+                case 'go':
+                    return [commentBlock, commentLine, strBacktick, strDouble, strSingle, hexNumbers, numbers, goTypes, goKeywords, goBuiltins, jsFuncCall];
+                case 'java':
+                    return [commentBlock, commentLine, strDouble, strSingle, hexNumbers, numbers, jsKeywords, jsFuncCall];
+                case 'c':
+                    return [commentBlock, commentLine, strDouble, strSingle, hexNumbers, numbers, jsKeywords, jsFuncCall];
+                case 'php':
+                    return [commentBlock, commentLine, commentHash, strDouble, strSingle, hexNumbers, numbers, jsKeywords, jsFuncCall, bashVar];
+                default:
+                    // Generic highlighting for unrecognized languages
+                    return [commentBlock, commentLine, commentHash, strDouble, strSingle, hexNumbers, numbers, jsKeywords, jsFuncCall];
+            }
+        }
+
+        function applyHighlighting(code, rules) {
+            // Build a token map: for each character position, store the token span
+            var tokens = []; // [{start, end, cls}]
+
+            for (var r = 0; r < rules.length; r++) {
+                var regex = rules[r][0];
+                var cls = rules[r][1];
+                // Reset regex
+                regex.lastIndex = 0;
+                var match;
+                while ((match = regex.exec(code)) !== null) {
+                    var start = match.index;
+                    var end = match.index + match[0].length;
+                    // Check if this range overlaps with any existing token
+                    var overlaps = false;
+                    for (var t = 0; t < tokens.length; t++) {
+                        if (start < tokens[t].end && end > tokens[t].start) {
+                            overlaps = true;
+                            break;
+                        }
+                    }
+                    if (!overlaps) {
+                        tokens.push({ start: start, end: end, cls: cls });
+                    }
+                }
+            }
+
+            if (tokens.length === 0) return code;
+
+            // Sort by start position
+            tokens.sort(function(a, b) { return a.start - b.start; });
+
+            // Build the highlighted string
+            var result = '';
+            var pos = 0;
+            for (var i = 0; i < tokens.length; i++) {
+                var tok = tokens[i];
+                if (tok.start > pos) {
+                    result += code.substring(pos, tok.start);
+                }
+                result += '<span class="' + tok.cls + '">' + code.substring(tok.start, tok.end) + '</span>';
+                pos = tok.end;
+            }
+            if (pos < code.length) {
+                result += code.substring(pos);
+            }
+
+            return result;
+        }
+
+        // ── Diff Rendering ─────────────────────────────────
+        function renderDiff(oldText, newText, lang) {
+            if (!oldText && newText) {
+                // Pure addition
+                var addLines = newText.split('\\n');
+                var html = '';
+                for (var i = 0; i < addLines.length; i++) {
+                    var content = highlightCode(escapeHtml(addLines[i]), lang || '');
+                    html += '<div class="diff-line diff-added">'
+                        + '<span class="diff-line-num">' + (i + 1) + '</span>'
+                        + '<span class="diff-line-sign">+</span>'
+                        + '<span class="diff-line-content">' + content + '</span>'
+                        + '</div>';
+                }
+                return html;
+            }
+
+            var oldLines = (oldText || '').split('\\n');
+            var newLines = (newText || '').split('\\n');
+
+            // Compute simple LCS-based diff
+            var diff = computeDiff(oldLines, newLines);
+            var html = '';
+
+            for (var d = 0; d < diff.length; d++) {
+                var entry = diff[d];
+                var lineContent = highlightCode(escapeHtml(entry.text), lang || '');
+                if (entry.type === 'remove') {
+                    html += '<div class="diff-line diff-removed">'
+                        + '<span class="diff-line-num">' + entry.oldNum + '</span>'
+                        + '<span class="diff-line-sign">−</span>'
+                        + '<span class="diff-line-content">' + lineContent + '</span>'
+                        + '</div>';
+                } else if (entry.type === 'add') {
+                    html += '<div class="diff-line diff-added">'
+                        + '<span class="diff-line-num">' + entry.newNum + '</span>'
+                        + '<span class="diff-line-sign">+</span>'
+                        + '<span class="diff-line-content">' + lineContent + '</span>'
+                        + '</div>';
+                } else {
+                    html += '<div class="diff-line diff-context">'
+                        + '<span class="diff-line-num">' + entry.oldNum + '</span>'
+                        + '<span class="diff-line-sign"> </span>'
+                        + '<span class="diff-line-content">' + lineContent + '</span>'
+                        + '</div>';
+                }
+            }
+
+            return html;
+        }
+
+        function computeDiff(oldLines, newLines) {
+            // Myers-like O(ND) diff — simplified for webview
+            // Returns array of {type: 'context'|'add'|'remove', text, oldNum?, newNum?}
+            var m = oldLines.length;
+            var n = newLines.length;
+
+            // For very large diffs, fall back to simple line-by-line
+            if (m + n > 2000) {
+                return simpleDiff(oldLines, newLines);
+            }
+
+            // Build LCS table
+            var lcs = [];
+            for (var i = 0; i <= m; i++) {
+                lcs[i] = [];
+                for (var j = 0; j <= n; j++) {
+                    if (i === 0 || j === 0) {
+                        lcs[i][j] = 0;
+                    } else if (oldLines[i - 1] === newLines[j - 1]) {
+                        lcs[i][j] = lcs[i - 1][j - 1] + 1;
+                    } else {
+                        lcs[i][j] = Math.max(lcs[i - 1][j], lcs[i][j - 1]);
+                    }
+                }
+            }
+
+            // Backtrack to produce diff
+            var result = [];
+            var i = m, j = n;
+            while (i > 0 || j > 0) {
+                if (i > 0 && j > 0 && oldLines[i - 1] === newLines[j - 1]) {
+                    result.unshift({ type: 'context', text: oldLines[i - 1], oldNum: i, newNum: j });
+                    i--; j--;
+                } else if (j > 0 && (i === 0 || lcs[i][j - 1] >= lcs[i - 1][j])) {
+                    result.unshift({ type: 'add', text: newLines[j - 1], newNum: j });
+                    j--;
+                } else {
+                    result.unshift({ type: 'remove', text: oldLines[i - 1], oldNum: i });
+                    i--;
+                }
+            }
+
+            return result;
+        }
+
+        function simpleDiff(oldLines, newLines) {
+            var result = [];
+            var maxLen = Math.max(oldLines.length, newLines.length);
+            for (var i = 0; i < maxLen; i++) {
+                if (i < oldLines.length && i < newLines.length && oldLines[i] === newLines[i]) {
+                    result.push({ type: 'context', text: oldLines[i], oldNum: i + 1, newNum: i + 1 });
+                } else {
+                    if (i < oldLines.length) {
+                        result.push({ type: 'remove', text: oldLines[i], oldNum: i + 1 });
+                    }
+                    if (i < newLines.length) {
+                        result.push({ type: 'add', text: newLines[i], newNum: i + 1 });
+                    }
+                }
+            }
+            return result;
+        }
+
+        // ── SVG Tool Icons ─────────────────────────────────
+        // All icons are 16x16 stroke-based SVGs using currentColor
+        function getToolSvg(name) {
+            var svgs = {
+                // read_file — open document with lines
+                read_file: '<svg viewBox="0 0 16 16"><path d="M4 1.5h5.5L13 5v9.5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-13a1 1 0 0 1 1-1z"/><polyline points="9 1.5 9 5.5 13 5.5"/><line x1="5.5" y1="8" x2="10.5" y2="8"/><line x1="5.5" y1="10.5" x2="10.5" y2="10.5"/></svg>',
+                // write_file — pencil on page
+                write_file: '<svg viewBox="0 0 16 16"><path d="M4 1.5h5.5L13 5v9.5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-13a1 1 0 0 1 1-1z"/><polyline points="9 1.5 9 5.5 13 5.5"/><path d="M6 12.5l-1.5.5.5-1.5L9.5 7l1 1L6 12.5z"/></svg>',
+                // edit_file — wrench
+                edit_file: '<svg viewBox="0 0 16 16"><path d="M10.5 2.5l3 3-8.5 8.5H2v-3l8.5-8.5z"/><line x1="8.5" y1="4.5" x2="11.5" y2="7.5"/></svg>',
+                // multi_edit_files — stacked docs with pencil
+                multi_edit_files: '<svg viewBox="0 0 16 16"><path d="M5 3.5h5l3 3V13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1z"/><polyline points="10 3.5 10 6.5 13 6.5"/><path d="M3 11.5V2.5a1 1 0 0 1 1-1h5"/><path d="M7 12l-1 .5.25-1L9.5 8.25l.75.75L7 12z"/></svg>',
+                // grep_search — magnifying glass
+                grep_search: '<svg viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><line x1="10.2" y1="10.2" x2="14" y2="14"/></svg>',
+                // search_files — folder with lens
+                search_files: '<svg viewBox="0 0 16 16"><path d="M1.5 3.5a1 1 0 0 1 1-1h3l1.5 1.5h6a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-8.5z"/><circle cx="8.5" cy="8.5" r="2.5"/><line x1="10.3" y1="10.3" x2="12" y2="12"/></svg>',
+                // list_directory — folder tree
+                list_directory: '<svg viewBox="0 0 16 16"><path d="M1.5 3a1 1 0 0 1 1-1h3l1.5 1.5h6a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1V3z"/></svg>',
+                // run_command — terminal prompt
+                run_command: '<svg viewBox="0 0 16 16"><rect x="1" y="2" width="14" height="12" rx="1.5"/><polyline points="4 7 6.5 9 4 11"/><line x1="8" y1="11" x2="12" y2="11"/></svg>',
+                // get_diagnostics — warning triangle
+                get_diagnostics: '<svg viewBox="0 0 16 16"><path d="M8 1.5L1 14h14L8 1.5z"/><line x1="8" y1="6" x2="8" y2="10"/><circle cx="8" cy="12" r="0.5" fill="currentColor" stroke="none"/></svg>',
+                // web_search — globe
+                web_search: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5"/><ellipse cx="8" cy="8" rx="3" ry="6.5"/><line x1="1.5" y1="8" x2="14.5" y2="8"/><path d="M2.5 4.5h11M2.5 11.5h11"/></svg>',
+                // fetch_webpage — download/arrow into box
+                fetch_webpage: '<svg viewBox="0 0 16 16"><polyline points="4 8 8 12 12 8"/><line x1="8" y1="2" x2="8" y2="12"/><path d="M2 11v2.5a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V11"/></svg>',
+                // run_subagent — branching nodes
+                run_subagent: '<svg viewBox="0 0 16 16"><circle cx="8" cy="3" r="2"/><circle cx="3.5" cy="12.5" r="1.5"/><circle cx="12.5" cy="12.5" r="1.5"/><line x1="8" y1="5" x2="3.5" y2="11"/><line x1="8" y1="5" x2="12.5" y2="11"/></svg>',
+            };
+            return svgs[name] || '<svg viewBox="0 0 16 16"><polygon points="8 1 10 6 15 6.5 11 10 12.5 15 8 12 3.5 15 5 10 1 6.5 6 6"/></svg>';
         }
 
         // --- File Attachments ---
@@ -2994,13 +3433,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     proposalDiv.className = 'edit-proposal';
 
                     let diffHtml = '';
+                    const editLang = data.language || '';
                     if (data.edits && data.edits.length > 0) {
                         diffHtml = '<div class="edit-proposal-diff">';
+                        diffHtml += '<div class="diff-header">' + data.editCount + ' edit' + (data.editCount !== 1 ? 's' : '') + ' proposed</div>';
                         for (const e of data.edits) {
-                            if (e.oldText) {
-                                diffHtml += '<div class="diff-old">- ' + escapeHtml(e.oldText) + (e.oldText.length >= 120 ? '...' : '') + '</div>';
+                            diffHtml += renderDiff(e.oldText, e.newText, editLang);
+                            // Add a separator between edits if multiple
+                            if (data.edits.length > 1 && e !== data.edits[data.edits.length - 1]) {
+                                diffHtml += '<div class="diff-line" style="border-top:1px dashed var(--vscode-editorGroup-border,transparent);height:1px;"></div>';
                             }
-                            diffHtml += '<div class="diff-new">+ ' + escapeHtml(e.newText) + (e.newText.length >= 120 ? '...' : '') + '</div>';
                         }
                         diffHtml += '</div>';
                     }
@@ -3160,17 +3602,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         const block = document.createElement('div');
                         block.className = 'tool-call-block';
                         block.id = 'tc-' + (data.callId || Date.now());
-
-                        const toolIcon = data.name === 'run_subagent' ? '🤖'
-                            : data.name === 'read_file' ? '📖'
-                            : data.name === 'write_file' ? '✏️'
-                            : data.name === 'edit_file' ? '🔧'
-                            : data.name === 'grep_search' ? '🔍'
-                            : data.name === 'search_files' ? '📂'
-                            : data.name === 'list_directory' ? '📁'
-                            : data.name === 'run_command' ? '▶️'
-                            : data.name === 'get_diagnostics' ? '⚠️'
-                            : '⚡';
+                        block.dataset.toolName = data.name;
 
                         const summary = data.args && data.args.path ? data.args.path
                             : data.args && data.args.query ? data.args.query
@@ -3179,12 +3611,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             : data.args && data.args.task ? data.args.task.substring(0, 60)
                             : '';
 
+                        var spinnerSvg = '<svg viewBox="0 0 16 16"><path d="M8 1.5A6.5 6.5 0 1 0 14.5 8" stroke-width="1.5"/></svg>';
+                        var chevronSvg = '<svg viewBox="0 0 16 16"><polyline points="6 4 10 8 6 12"/></svg>';
+
                         block.innerHTML = ''
                             + '<div class="tool-call-header">'
-                            +   '<span class="tool-call-icon spinning">⏳</span>'
+                            +   '<span class="tool-call-icon spinning">' + spinnerSvg + '</span>'
                             +   '<span class="tool-call-name">' + escapeHtml(data.name) + '</span>'
                             +   '<span class="tool-call-summary">' + escapeHtml(summary) + '</span>'
-                            +   '<span class="tool-call-chevron">▶</span>'
+                            +   '<span class="tool-call-chevron">' + chevronSvg + '</span>'
                             + '</div>'
                             + '<div class="tool-call-details">Running...</div>';
 
@@ -3204,10 +3639,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         const icon = block.querySelector('.tool-call-icon');
                         icon.classList.remove('spinning');
                         if (data.success) {
-                            icon.textContent = '✅';
+                            icon.innerHTML = getToolSvg(block.dataset.toolName || data.name);
                             icon.className = 'tool-call-icon tool-call-status-success';
                         } else {
-                            icon.textContent = '❌';
+                            icon.innerHTML = '<svg viewBox="0 0 16 16"><line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg>';
                             icon.className = 'tool-call-icon tool-call-status-fail';
                         }
                         const details = block.querySelector('.tool-call-details');

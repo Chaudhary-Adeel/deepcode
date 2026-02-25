@@ -109,8 +109,9 @@ You think → use tools → observe → repeat until done. Be autonomous — use
 1. Check if you can answer from provided context FIRST.
 2. If not, use the fewest tools needed to get the answer.
 3. For edits: read_file → edit_file → get_diagnostics. That's it.
-4. For multi-file work: use run_subagent to parallelize.
-5. Use web_search only when workspace info is insufficient.
+4. For multi-file edits: use multi_edit_files to edit several files in one call.
+5. For truly complex multi-file tasks: use run_subagent to parallelize.
+6. Use web_search only when workspace info is insufficient.
 
 ## Response Quality
 - Be direct. Lead with the answer.
@@ -122,6 +123,15 @@ You think → use tools → observe → repeat until done. Be autonomous — use
 - oldText must be verbatim from the file
 - Always read_file before edit_file
 - Include enough context for a unique match
+- After edits, diagnostics are automatically reported — if errors appear, fix them immediately in the next step
+- Be progressive: apply edits, check the auto-diagnostics, fix any issues, repeat until clean
+- For changes spanning multiple files, prefer multi_edit_files over separate edit_file calls
+
+## Error Recovery
+- If a tool call fails, read the error message carefully and retry with corrected arguments.
+- NEVER give up after a single tool failure — adjust and try again.
+- If edit_file fails to find oldText, re-read the file to get the exact current content, then retry.
+- If write_file fails, check that you provided both path and content arguments.
 
 ## Workspace
 {WORKSPACE_CONTEXT}`;
@@ -166,6 +176,7 @@ export class AgentLoop {
         this.messages.push({ role: 'user', content: userMessage });
 
         let iteration = 0;
+        let consecutiveApiErrors = 0;
 
         while (iteration < this.opts.maxIterations) {
             if (this.opts.checkCancelled?.()) {
@@ -179,11 +190,32 @@ export class AgentLoop {
                 this.opts.onProgress?.('Working on it...');
             }
 
-            // Call DeepSeek API — stream tokens after first iteration
-            // (first call likely returns tool calls; subsequent calls more likely to answer)
-            const shouldStream = iteration > 1 && !!this.opts.onToken;
-            const response = await this.callAPI(shouldStream);
-            this.totalTokens += response.tokens;
+            let response;
+            try {
+                // Call DeepSeek API — stream tokens after first iteration
+                // (first call likely returns tool calls; subsequent calls more likely to answer)
+                const shouldStream = iteration > 1 && !!this.opts.onToken;
+                response = await this.callAPI(shouldStream);
+                this.totalTokens += response.tokens;
+                consecutiveApiErrors = 0;
+            } catch (apiError: any) {
+                consecutiveApiErrors++;
+                const errMsg = apiError?.message || String(apiError);
+                if (consecutiveApiErrors >= 3) {
+                    // Too many API failures — bail out
+                    return {
+                        content: `I encountered repeated API errors and couldn't complete the task. Last error: ${errMsg}`,
+                        totalTokens: this.totalTokens,
+                        toolCalls: this.toolCallLog,
+                        iterations: iteration,
+                        subAgentResults: this.subAgentResults,
+                    };
+                }
+                this.opts.onProgress?.(`API error (retrying): ${errMsg}`);
+                // Wait briefly before retrying
+                await new Promise(r => setTimeout(r, 1000 * consecutiveApiErrors));
+                continue;
+            }
 
             const message = response.message;
 
@@ -211,38 +243,55 @@ export class AgentLoop {
 
                         this.opts.onToolCall?.(tc.function.name, args);
 
-                        // Sub-agent handling
-                        if (
-                            tc.function.name === 'run_subagent' &&
-                            !this.opts.isSubAgent
-                        ) {
-                            const subResult = await this.runSubAgent(
-                                args.task || '',
-                                args.context || ''
+                        try {
+                            // Sub-agent handling
+                            if (
+                                tc.function.name === 'run_subagent' &&
+                                !this.opts.isSubAgent
+                            ) {
+                                const subResult = await this.runSubAgent(
+                                    args.task || '',
+                                    args.context || ''
+                                );
+                                const result: ToolCallResult = {
+                                    success: true,
+                                    output: subResult,
+                                };
+                                this.opts.onToolResult?.(tc.function.name, result);
+                                return { id: tc.id, name: tc.function.name, args, result };
+                            }
+
+                            // Standard tool execution
+                            const result = await this.opts.toolExecutor.execute(
+                                tc.function.name,
+                                args
                             );
+                            this.opts.onToolResult?.(tc.function.name, result);
+
+                            this.toolCallLog.push({
+                                name: tc.function.name,
+                                args,
+                                result: result.output,
+                                success: result.success,
+                            });
+
+                            return { id: tc.id, name: tc.function.name, args, result };
+                        } catch (toolError: any) {
+                            // Catch ALL errors so Promise.all never rejects
+                            const errorMsg = toolError?.message || String(toolError) || 'Unknown error';
                             const result: ToolCallResult = {
-                                success: true,
-                                output: subResult,
+                                success: false,
+                                output: `Tool "${tc.function.name}" failed with error: ${errorMsg}. Please review the arguments and try again.`,
                             };
                             this.opts.onToolResult?.(tc.function.name, result);
+                            this.toolCallLog.push({
+                                name: tc.function.name,
+                                args,
+                                result: result.output,
+                                success: false,
+                            });
                             return { id: tc.id, name: tc.function.name, args, result };
                         }
-
-                        // Standard tool execution
-                        const result = await this.opts.toolExecutor.execute(
-                            tc.function.name,
-                            args
-                        );
-                        this.opts.onToolResult?.(tc.function.name, result);
-
-                        this.toolCallLog.push({
-                            name: tc.function.name,
-                            args,
-                            result: result.output,
-                            success: result.success,
-                        });
-
-                        return { id: tc.id, name: tc.function.name, args, result };
                     })
                 );
 
@@ -303,7 +352,7 @@ export class AgentLoop {
         // Mixed tools — describe the dominant action
         const hasSearch = names.some(n => n === 'grep_search' || n === 'search_files');
         const hasRead = names.some(n => n === 'read_file');
-        const hasEdit = names.some(n => n === 'edit_file' || n === 'write_file');
+        const hasEdit = names.some(n => n === 'edit_file' || n === 'write_file' || n === 'multi_edit_files');
         const hasSubAgent = names.some(n => n === 'run_subagent');
 
         if (hasSubAgent) { return 'Investigating multiple areas in parallel...'; }
@@ -331,6 +380,10 @@ export class AgentLoop {
             case 'edit_file': {
                 const file = args.path || '';
                 return `Editing ${file}...`;
+            }
+            case 'multi_edit_files': {
+                const count = (args.files || []).length;
+                return `Editing ${count} file(s)...`;
             }
             case 'list_directory': {
                 const dir = args.path || 'project';
