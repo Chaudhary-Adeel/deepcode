@@ -1,25 +1,39 @@
-import * as https from 'https';
+import * as vscode from 'vscode';
+import {
+    AgentLoop,
+    AGENT_SYSTEM_PROMPT,
+    AgentLoopResult,
+    AgentMessage,
+} from './agentLoop';
+import {
+    ToolExecutor,
+    ToolCallResult,
+    AGENT_TOOLS,
+    SUBAGENT_TOOLS,
+} from './tools';
+import { ContextManager } from './contextManager';
+import { MemoryService } from './memoryService';
 
 /**
- * Sub-Agent Service for DeepCode — v2
+ * Sub-Agent Service for DeepCode — v3 (Agentic Tool-Use Architecture)
  *
- * Architecture (inspired by Claude Code internals):
- *   Single deeply-instructed prompt with chain-of-thought reasoning.
- *   No multi-agent routing overhead — one focused, powerful call per task.
+ * Architecture:
+ *   Full agentic loop with tool use for both chat and edit flows.
+ *   Uses AgentLoop + ToolExecutor to iteratively think, act, and observe.
  *
  *   For edits:
- *     1. Analyze phase: understand the code, plan changes
- *     2. Execute phase: produce minimal surgical diffs
- *     3. Validate phase: verify oldText matches exist in the file
- *     4. Retry on malformed output (up to 2 retries)
+ *     1. Agent reads the file with read_file
+ *     2. Agent plans and applies edits with edit_file
+ *     3. Agent verifies with get_diagnostics
+ *     4. Service extracts applied edits for caller approval workflow
  *
  *   For chat:
- *     1. Single call with comprehensive system prompt
- *     2. Chain-of-thought reasoning before answering
- *     3. Context-aware responses using smart compression
+ *     1. Agent explores codebase with tools (read_file, grep_search, etc.)
+ *     2. Agent reasons and responds with full context
+ *     3. Agent can spawn sub-agents for parallel investigation
  */
 
-const DEEPSEEK_API_BASE = 'api.deepseek.com';
+// ─── Types (backward compatible) ────────────────────────────────────────────
 
 export type AgentRole = 'frontend' | 'backend' | 'patterns' | 'logic';
 
@@ -36,135 +50,65 @@ export interface OrchestratedResponse {
     agentsUsed: AgentRole[];
 }
 
-interface LLMCallOptions {
-    apiKey: string;
-    model: string;
-    system: string;
-    user: string;
-    temperature: number;
-    maxTokens: number;
-    topP: number;
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+const MAX_ITERATIONS = 25;
+const DEFAULT_MAX_TOKENS = 8192;
+
+/**
+ * Scout sub-agent definitions used for pre-flight parallel context gathering.
+ * Before the main agent loop, we spawn multiple scouts simultaneously to
+ * build a comprehensive picture of the codebase so the main agent starts
+ * with excellent context.
+ */
+interface ScoutTask {
+    id: string;
+    label: string;
+    buildPrompt: (userMessage: string, workspaceContext: string) => string;
 }
 
-// ─── System Prompts ─────────────────────────────────────────────────────────
-
-const CHAT_SYSTEM_PROMPT = `You are DeepCode — a principal-level software engineer embedded in VS Code. You have deep expertise across the entire stack: systems programming, web development, distributed systems, compilers, databases, DevOps, and security.
-
-## How You Think
-
-Before responding to ANY request, silently perform this analysis:
-
-1. **Classify the request**: Is the user asking you to explain, review, fix, create, refactor, debug, or analyze?
-2. **Understand the context**: What language, framework, patterns, and conventions are present? What's the broader architecture?
-3. **Identify what matters**: What are the key correctness concerns, edge cases, performance implications, and security risks?
-4. **Plan your response**: What's the most direct, helpful answer?
-
-## Response Rules
-
-- **Lead with the answer.** The first sentence should directly address what the user asked.
-- **Be surgical.** Only discuss what's relevant. No filler, no preamble, no "Great question!" or "Sure, I can help!"
-- **Show, don't tell.** Use code examples over lengthy explanations.
-- **Be precise.** Name the exact patterns, algorithms, complexity classes, and principles you reference.
-- **Flag risks proactively.** If you see security vulnerabilities (injection, XSS, auth issues, secrets exposure), race conditions, memory leaks, or O(n²) where O(n) is possible — say so immediately, even if the user didn't ask.
-- **Respect existing code style.** When suggesting changes, match the project's naming conventions, import style, error handling patterns, and formatting.
-- **Never hallucinate.** If you're unsure whether an API, method, or library feature exists, say so explicitly. Never invent function signatures.
-
-## For Code Review / Analysis
-
-When reviewing or analyzing code:
-- Check correctness first (bugs, logic errors, edge cases, off-by-one, null handling)
-- Then check security (injection, XSS, auth, secrets, CSRF, race conditions)
-- Then check performance (unnecessary allocations, N+1 queries, redundant computation, complexity)
-- Then check design (SOLID violations, code smells, coupling, naming, abstractions)
-- Prioritize findings by severity: bugs > security > performance > design
-
-## For Debugging
-
-When debugging:
-- Reason step by step: reproduce mentally → isolate root cause → propose targeted fix → verify no regressions
-- Distinguish symptoms from root causes. Fix the disease, not the symptom.
-- When multiple solutions exist, briefly present tradeoffs and recommend the best one.
-
-## For Code Generation
-
-When generating code:
-- Match existing project patterns exactly (imports, error handling, naming, formatting)
-- Production-grade: proper error handling, edge case coverage, type safety
-- Comments only where logic is non-obvious — never comment the self-evident
-- Prefer simple, readable code over clever abstractions
-
-## Format
-
-- Use markdown for structure when helpful (headers, bullets, code blocks)
-- For code changes, show clear before/after or the minimal diff
-- Keep responses concise — aim for the minimum text that fully answers the question`;
-
-const EDIT_SYSTEM_PROMPT = `You are DeepCode — an expert code editor that produces precise, minimal, surgical edits. You think carefully before making changes and understand the full implications of every edit.
-
-## Your Process
-
-For every edit request, follow these steps IN ORDER:
-
-### Step 1: Analyze
-- Read the full file carefully. Understand its structure, imports, exports, dependencies.
-- Identify the exact scope of change needed. What MUST change? What must NOT change?
-- Consider: Will this edit break any callers? Any imports? Any types? Any tests?
-
-### Step 2: Plan
-- Determine the MINIMAL set of edits to achieve the goal.
-- Each edit should be as small and precise as possible.
-- Prefer fewer edits. If you can achieve the goal with 1 edit instead of 3, use 1.
-- NEVER rewrite code that doesn't need to change.
-
-### Step 3: Execute
-- Each \`oldText\` MUST be an EXACT character-for-character substring of the original file. This includes whitespace, indentation, newlines, semicolons — everything.
-- Each \`newText\` should preserve the surrounding code's style (indentation, naming, formatting).
-- If adding new code, use an \`oldText\` that captures a unique anchor point (like the line before or after where you want to insert).
-
-### Step 4: Verify
-- Mentally apply each edit to the file and check: Does the result compile? Does it do what was asked? Did it break anything?
-
-## Output Format
-
-You MUST respond ONLY with this JSON (no markdown fences, no explanation outside the JSON):
-{
-  "edits": [
+const SCOUT_TASKS: ScoutTask[] = [
     {
-      "oldText": "exact text from the original file",
-      "newText": "replacement text"
-    }
-  ],
-  "explanation": "Brief explanation of what was changed and why"
-}
+        id: 'structure',
+        label: 'Exploring project structure',
+        buildPrompt: (msg, ctx) =>
+            `The user asked: "${msg.substring(0, 500)}"
 
-## Critical Rules
+Workspace context:
+${ctx}
 
-- oldText must be VERBATIM from the file — copy it exactly, including all whitespace and punctuation
-- Each oldText must be unique in the file (if not, include more surrounding context to make it unique)
-- Do NOT include the entire file — only the specific sections that need to change
-- Do NOT add unnecessary changes (extra comments, reformatting untouched code, etc.)
-- If the instruction is ambiguous, make the safest minimal interpretation
-- If the instruction would introduce a bug or security issue, fix that too and mention it in the explanation`;
+Your task: Explore the project structure to understand the codebase layout. Use list_directory (recursive) on the root, then identify the most important files and directories relevant to the user's request. Read package.json, any config files, and key entry points. Return a structured summary of the project architecture, tech stack, and which files/directories are most relevant to the user's question.`,
+    },
+    {
+        id: 'search',
+        label: 'Searching for relevant patterns',
+        buildPrompt: (msg, _ctx) =>
+            `The user asked: "${msg.substring(0, 500)}"
 
-const EDIT_RETRY_PROMPT = `Your previous edit response had issues. The following oldText values were NOT found in the file:
+Your task: Search the codebase for patterns, keywords, and references related to the user's request. Use grep_search with multiple relevant queries (function names, class names, variable names, error messages, or concepts mentioned in the request). Also use search_files to find files with relevant names. Return a comprehensive list of all relevant matches with file paths, line numbers, and context.`,
+    },
+    {
+        id: 'context',
+        label: 'Reading key files for context',
+        buildPrompt: (msg, ctx) =>
+            `The user asked: "${msg.substring(0, 500)}"
 
-{MISSING_TEXTS}
+Workspace context:
+${ctx}
 
-This means those edits cannot be applied. Common causes:
-- Extra/missing whitespace or indentation
-- Missing or extra newlines
-- Slightly different punctuation or variable names
-- The text was modified by a previous edit in the same response
-
-Please re-read the original file content carefully and produce corrected edits. Remember: oldText must be a VERBATIM character-for-character match from the original file.
-
-Respond with the corrected JSON only.`;
+Your task: Based on the user's request, identify and read the most important files that would help answer or fulfill the request. Read up to 5 key files using read_file. Focus on files that are directly referenced, likely entry points, or contain the code areas the user is asking about. Return the key findings from each file — important functions, classes, patterns, dependencies, and anything relevant to the user's request.`,
+    },
+];
 
 // ─── Service Implementation ─────────────────────────────────────────────────
 
 export class SubAgentService {
+
     /**
-     * Handle a chat message — single focused call with chain-of-thought.
+     * Handle a chat message using the full agentic tool-use loop.
+     * The agent can read files, search the codebase, run commands, and
+     * spawn sub-agents before producing its final response.
+     *
      * Maintains backward compatibility with OrchestratedResponse.
      */
     async orchestrateChat(
@@ -177,44 +121,66 @@ export class SubAgentService {
         onStatus?: (status: string) => void,
         checkCancelled?: () => boolean,
     ): Promise<OrchestratedResponse> {
-        onStatus?.('Analyzing...');
+        onStatus?.('Building workspace context...');
         if (checkCancelled?.()) { throw new Error('Cancelled'); }
 
-        const compactContext = context
-            ? this.buildSmartContext(context, 12000)
-            : '';
+        const toolExecutor = new ToolExecutor();
+        const contextManager = new ContextManager();
+        const memoryService = new MemoryService();
 
-        const userPrompt = compactContext
-            ? `${compactContext}\n\n---\n\n${userMessage}`
-            : userMessage;
+        // Build workspace context and populate system prompt
+        const workspaceContext = await contextManager.buildWorkspaceContext();
+        const memoryContext = await memoryService.getMemoryContext();
+        let enrichedContext = workspaceContext;
+        if (memoryContext) {
+            enrichedContext = `${memoryContext}\n\n${workspaceContext}`;
+        }
+        const systemPrompt = AGENT_SYSTEM_PROMPT.replace(
+            '{WORKSPACE_CONTEXT}',
+            enrichedContext
+        );
 
-        onStatus?.('Generating response...');
-        const result = await this.llmCall({
+        // Prepend additional context (editor state, attached files, etc.)
+        let fullUserMessage = userMessage;
+        if (context) {
+            const compressed = contextManager.compressContext(context, 12000);
+            fullUserMessage = `${compressed}\n\n---\n\n${userMessage}`;
+        }
+
+        onStatus?.('Starting agent...');
+
+        const agentLoop = new AgentLoop({
             apiKey,
             model,
-            system: CHAT_SYSTEM_PROMPT,
-            user: userPrompt,
+            systemPrompt,
             temperature,
-            maxTokens: 8192,
             topP,
+            maxTokens: DEFAULT_MAX_TOKENS,
+            maxIterations: MAX_ITERATIONS,
+            tools: AGENT_TOOLS,
+            toolExecutor,
+            onProgress: onStatus,
+            checkCancelled,
         });
 
-        if (checkCancelled?.()) { throw new Error('Cancelled'); }
+        const result = await agentLoop.run(fullUserMessage);
 
-        return {
-            content: result.content,
-            agentResults: [{
-                role: 'logic' as AgentRole,
-                content: result.content,
-                tokens: result.tokens,
-            }],
-            totalTokens: result.tokens,
-            agentsUsed: ['logic'],
-        };
+        return this.mapToOrchestratedResponse(result);
     }
 
     /**
-     * Handle an edit request — analyze, produce edits, validate, retry if needed.
+     * Handle an edit request using the full agentic loop.
+     * The agent reads the target file, plans surgical edits, applies them
+     * via the edit_file tool, and verifies correctness.
+     *
+     * After the loop completes:
+     *   - If the agent used edit_file: reverts the file to original content
+     *     and returns the edits as JSON so the caller's approval workflow
+     *     (parseEditResponse → user approve → applyEdits) works unchanged.
+     *   - If the agent used write_file: same revert + return a whole-file edit.
+     *   - If the agent only gave text instructions: returns the raw content
+     *     so the caller can attempt JSON extraction as a fallback.
+     *
      * Maintains backward compatibility with OrchestratedResponse.
      */
     async orchestrateEdit(
@@ -229,227 +195,451 @@ export class SubAgentService {
         onStatus?: (status: string) => void,
         checkCancelled?: () => boolean,
     ): Promise<OrchestratedResponse> {
-        onStatus?.('Analyzing code...');
+        onStatus?.('Building workspace context...');
         if (checkCancelled?.()) { throw new Error('Cancelled'); }
 
-        // Build a rich user prompt with file structure awareness
-        const userPrompt = this.buildEditPrompt(fileContent, fileName, instruction, selectedText);
+        const toolExecutor = new ToolExecutor();
+        const contextManager = new ContextManager();
 
-        onStatus?.('Planning edits...');
-        let result = await this.llmCall({
+        const workspaceContext = await contextManager.buildWorkspaceContext();
+        const systemPrompt = AGENT_SYSTEM_PROMPT.replace(
+            '{WORKSPACE_CONTEXT}',
+            workspaceContext
+        );
+
+        // Build an edit-specific user message with file content and instruction
+        const userMessage = this.buildEditUserMessage(
+            fileContent,
+            fileName,
+            instruction,
+            selectedText
+        );
+
+        onStatus?.('Analyzing code and planning edits...');
+
+        const agentLoop = new AgentLoop({
             apiKey,
             model,
-            system: EDIT_SYSTEM_PROMPT,
-            user: userPrompt,
+            systemPrompt,
             temperature: Math.min(temperature, 0.1), // Keep edits deterministic
-            maxTokens: 8192,
             topP,
+            maxTokens: DEFAULT_MAX_TOKENS,
+            maxIterations: MAX_ITERATIONS,
+            tools: AGENT_TOOLS,
+            toolExecutor,
+            onProgress: onStatus,
+            checkCancelled,
         });
 
-        if (checkCancelled?.()) { throw new Error('Cancelled'); }
+        const result = await agentLoop.run(userMessage);
 
-        // Validate and retry if needed (up to 2 retries)
-        // Catches both invalid JSON and missing oldText values.
-        let finalContent = result.content;
-        let totalTokens = result.tokens;
+        // ── Post-loop: extract edits and revert file for approval workflow ──
 
-        for (let attempt = 0; attempt < 2; attempt++) {
-            const validation = this.validateEditResponse(finalContent, fileContent);
-            if (validation.valid) { break; }
+        const relativePath = this.getRelativePath(fileName);
 
-            onStatus?.(`Fixing edit accuracy (attempt ${attempt + 1})...`);
+        // Case 1: Agent used edit_file on the target file
+        const extractedEdits = this.extractEditsFromToolCalls(result, relativePath);
+        if (extractedEdits.length > 0) {
+            // Revert the file so the caller can apply edits through its own
+            // approval + applyEdits workflow.
+            await this.revertFile(fileName, fileContent);
 
-            // Build a clear retry prompt explaining the issue
-            let retryPrompt: string;
-            if (validation.missingTexts.includes('[Invalid JSON in response]') ||
-                validation.missingTexts.includes('[Response missing "edits" array]')) {
-                // JSON parse failure — the model returned non-JSON
-                retryPrompt = `Your previous response was NOT valid JSON. You returned:\n\n${finalContent.substring(0, 300)}\n\nYou MUST respond ONLY with a JSON object in this exact format (NO markdown, NO explanations, NO code blocks unless they are inside the JSON):\n{\n  "edits": [\n    { "oldText": "exact text from file", "newText": "replacement text" }\n  ],\n  "explanation": "what was changed"\n}\n\nRespond with ONLY the JSON object.`;
-            } else {
-                retryPrompt = EDIT_RETRY_PROMPT.replace(
-                    '{MISSING_TEXTS}',
-                    validation.missingTexts.map((t, i) => `${i + 1}. "${t.substring(0, 100)}${t.length > 100 ? '...' : ''}"`).join('\n')
-                );
-            }
+            const explanation = result.content
+                ? this.truncate(result.content, 500)
+                : `Applied ${extractedEdits.length} edit(s) to ${relativePath || fileName}`;
 
-            const retryResult = await this.llmCall({
-                apiKey,
-                model,
-                system: EDIT_SYSTEM_PROMPT,
-                user: `${userPrompt}\n\n---\n\nPREVIOUS ATTEMPT (had errors):\n${finalContent}\n\n${retryPrompt}`,
-                temperature: 0,
-                maxTokens: 8192,
-                topP,
+            const jsonResponse = JSON.stringify({
+                edits: extractedEdits,
+                explanation,
             });
 
-            finalContent = retryResult.content;
-            totalTokens += retryResult.tokens;
-
-            if (checkCancelled?.()) { throw new Error('Cancelled'); }
+            return {
+                content: jsonResponse,
+                agentResults: [{
+                    role: 'logic' as AgentRole,
+                    content: jsonResponse,
+                    tokens: result.totalTokens,
+                }],
+                totalTokens: result.totalTokens,
+                agentsUsed: this.inferAgentsUsed(result),
+            };
         }
 
-        onStatus?.('Done');
+        // Case 2: Agent used write_file on the target file
+        const writeCall = result.toolCalls.find(
+            tc => tc.name === 'write_file' &&
+                  this.pathsMatch(tc.args.path, relativePath)
+        );
 
-        return {
-            content: finalContent,
-            agentResults: [{
-                role: 'logic' as AgentRole,
-                content: finalContent,
-                tokens: totalTokens,
-            }],
-            totalTokens,
-            agentsUsed: ['logic', 'patterns'],
-        };
-    }
+        if (writeCall) {
+            await this.revertFile(fileName, fileContent);
 
-    // ─── Context Building ────────────────────────────────────────────────
+            const newContent = writeCall.args.content || '';
+            const explanation = result.content
+                ? this.truncate(result.content, 500)
+                : 'File rewritten by agent';
 
-    /**
-     * Smart context compression that preserves code structure.
-     * Instead of naive head/tail truncation, this:
-     *   1. Preserves import/require blocks fully
-     *   2. Preserves function/class signatures
-     *   3. Preserves the focused region (selected text area)
-     *   4. Truncates function bodies intelligently
-     */
-    private buildSmartContext(text: string, maxChars: number): string {
-        if (text.length <= maxChars) { return text; }
+            const jsonResponse = JSON.stringify({
+                edits: [{ oldText: fileContent, newText: newContent }],
+                explanation,
+            });
 
-        const lines = text.split('\n');
-        const sections: { text: string; priority: number }[] = [];
-
-        let currentSection = '';
-        let currentPriority = 1; // default priority
-
-        for (const line of lines) {
-            const trimmed = line.trim();
-
-            // High priority: imports, exports, type definitions
-            if (/^(import |export |require\(|from |type |interface |enum )/.test(trimmed)) {
-                if (currentSection) {
-                    sections.push({ text: currentSection, priority: currentPriority });
-                    currentSection = '';
-                }
-                currentPriority = 3;
-            }
-            // Medium priority: function/class/method signatures
-            else if (/^(export )?(async )?(function |class |const \w+ = |let \w+ = |var \w+ = )/.test(trimmed) ||
-                     /^(public |private |protected |static |abstract |override )/.test(trimmed)) {
-                if (currentSection) {
-                    sections.push({ text: currentSection, priority: currentPriority });
-                    currentSection = '';
-                }
-                currentPriority = 2;
-            }
-            // Low priority: everything else
-            else if (currentPriority > 1 && trimmed === '') {
-                sections.push({ text: currentSection, priority: currentPriority });
-                currentSection = '';
-                currentPriority = 1;
-            }
-
-            currentSection += line + '\n';
+            return {
+                content: jsonResponse,
+                agentResults: [{
+                    role: 'logic' as AgentRole,
+                    content: jsonResponse,
+                    tokens: result.totalTokens,
+                }],
+                totalTokens: result.totalTokens,
+                agentsUsed: this.inferAgentsUsed(result),
+            };
         }
 
-        if (currentSection) {
-            sections.push({ text: currentSection, priority: currentPriority });
-        }
-
-        // Build result from highest priority sections first
-        sections.sort((a, b) => b.priority - a.priority);
-
-        let result = '';
-        let remaining = maxChars;
-
-        for (const section of sections) {
-            if (section.text.length <= remaining) {
-                result += section.text;
-                remaining -= section.text.length;
-            } else if (remaining > 200) {
-                // Truncate this section but keep the start
-                result += section.text.substring(0, remaining - 50);
-                result += '\n// ... truncated ...\n';
-                remaining = 0;
-                break;
-            }
-        }
-
-        return result || text.substring(0, maxChars);
+        // Case 3: Agent didn't use file tools — return raw content.
+        // The caller will attempt parseEditResponse as a fallback.
+        return this.mapToOrchestratedResponse(result);
     }
 
     /**
-     * Build a rich edit prompt with structural awareness.
+     * Raw agentic loop with full tool and callback visibility.
+     *
+     * This is the "power user" method — the sidebar can call it directly
+     * for the full agent experience: real-time tool call reporting,
+     * sub-agent results, conversation history continuity, attached files.
      */
-    private buildEditPrompt(
+    async runAgentLoop(
+        apiKey: string,
+        model: string,
+        userMessage: string,
+        context: string,
+        temperature: number,
+        topP: number,
+        attachedFiles?: string[],
+        conversationHistory?: AgentMessage[],
+        onStatus?: (status: string) => void,
+        onToolCall?: (toolName: string, args: Record<string, any>) => void,
+        onToolResult?: (toolName: string, result: ToolCallResult) => void,
+        checkCancelled?: () => boolean,
+    ): Promise<AgentLoopResult> {
+        const toolExecutor = new ToolExecutor();
+        const contextManager = new ContextManager();
+        const memoryService = new MemoryService();
+
+        // Build workspace context
+        const workspaceContext = await contextManager.buildWorkspaceContext();
+
+        // Load progressive memory for project understanding
+        onStatus?.('Loading project memory...');
+        const memoryContext = await memoryService.getMemoryContext();
+
+        // Inject memory into system prompt
+        let enrichedContext = workspaceContext;
+        if (memoryContext) {
+            enrichedContext = `${memoryContext}\n\n${workspaceContext}`;
+        }
+
+        const systemPrompt = AGENT_SYSTEM_PROMPT.replace(
+            '{WORKSPACE_CONTEXT}',
+            enrichedContext
+        );
+
+        // Build full user message with context and attached files
+        let fullUserMessage = userMessage;
+        if (context) {
+            const compressed = contextManager.compressContext(context, 12000);
+            fullUserMessage = `${compressed}\n\n---\n\n${userMessage}`;
+        }
+
+        if (attachedFiles && attachedFiles.length > 0) {
+            const fileContents = await contextManager.readMultipleFiles(attachedFiles);
+            let attachedContext = '\n\n--- Attached Files ---';
+            for (const fc of fileContents) {
+                const ext = fc.path.split('.').pop() || '';
+                attachedContext += `\n\nFile: ${fc.path}\n\`\`\`${ext}\n${fc.content}\n\`\`\``;
+            }
+            fullUserMessage += attachedContext;
+        }
+
+        // ── Pre-flight: Spawn Scout Sub-Agents in Parallel ──────────────
+        // Before the main agent loop, dispatch multiple scouts simultaneously
+        // to explore the codebase from different angles. This gives the main
+        // agent comprehensive context from step 1.
+
+        let scoutContext = '';
+        const isSimpleFollowUp = conversationHistory && conversationHistory.length > 2;
+        const isTrivial = userMessage.split(/\s+/).length < 8 && !userMessage.includes('file') && !userMessage.includes('code');
+
+        if (!isSimpleFollowUp && !isTrivial) {
+            onStatus?.('Deploying scout agents for parallel context gathering...');
+
+            const scoutResults = await this.runScoutAgents(
+                apiKey,
+                model,
+                userMessage,
+                workspaceContext,
+                temperature,
+                topP,
+                onStatus,
+                onToolCall,
+                onToolResult,
+                checkCancelled,
+            );
+
+            if (scoutResults.length > 0) {
+                scoutContext = '\n\n## Pre-gathered Context from Scout Agents\n\n';
+                for (const sr of scoutResults) {
+                    scoutContext += `### Scout: ${sr.label}\n${sr.content}\n\n`;
+                }
+            }
+        }
+
+        // Prepend scout findings to the user message so the main agent
+        // starts with excellent context
+        if (scoutContext) {
+            fullUserMessage = `${scoutContext}\n---\n\n${fullUserMessage}`;
+        }
+
+        onStatus?.('Starting main agent with full context...');
+
+        const agentLoop = new AgentLoop({
+            apiKey,
+            model,
+            systemPrompt,
+            temperature,
+            topP,
+            maxTokens: DEFAULT_MAX_TOKENS,
+            maxIterations: MAX_ITERATIONS,
+            tools: AGENT_TOOLS,
+            toolExecutor,
+            onProgress: onStatus,
+            onToolCall,
+            onToolResult,
+            checkCancelled,
+        });
+
+        const result = await agentLoop.run(fullUserMessage, conversationHistory);
+
+        // ── Post-flight: Update Progressive Memory ──────────────────────
+        // Store what we learned from this interaction so future runs start
+        // with better context and use fewer tokens.
+        try {
+            onStatus?.('Updating project memory...');
+            await memoryService.updateFromInteraction(
+                userMessage,
+                result.content,
+                result.toolCalls,
+                result.subAgentResults,
+            );
+        } catch {
+            // Non-critical — don't fail the response if memory update fails
+        }
+
+        return result;
+    }
+
+    /**
+     * Run parallel scout sub-agents to gather codebase context before the
+     * main agent loop starts. Each scout investigates a different aspect
+     * (structure, search, key files) simultaneously.
+     */
+    private async runScoutAgents(
+        apiKey: string,
+        model: string,
+        userMessage: string,
+        workspaceContext: string,
+        temperature: number,
+        topP: number,
+        onStatus?: (status: string) => void,
+        onToolCall?: (toolName: string, args: Record<string, any>) => void,
+        onToolResult?: (toolName: string, result: ToolCallResult) => void,
+        checkCancelled?: () => boolean,
+    ): Promise<Array<{ id: string; label: string; content: string; tokens: number }>> {
+        const scoutPromises = SCOUT_TASKS.map(async (scout) => {
+            onStatus?.(`Scout: ${scout.label}...`);
+
+            // Report the scout as a tool call for UI visibility
+            onToolCall?.('run_subagent', { task: `[Scout] ${scout.label}` });
+
+            const toolExecutor = new ToolExecutor();
+            const subAgent = new AgentLoop({
+                apiKey,
+                model,
+                systemPrompt: `You are a scout sub-agent for DeepCode. Your job is to quickly gather specific information from the codebase. Be fast, thorough, and return structured findings.
+
+Rules:
+- Use multiple tools in parallel when possible
+- Focus on breadth of coverage — gather as much relevant info as you can
+- Return findings in a clear, structured format with file paths and line numbers
+- Don't make edits — you are read-only reconnaissance
+- Be concise but complete — the main agent will use your findings to act`,
+                temperature,
+                topP,
+                maxTokens: DEFAULT_MAX_TOKENS,
+                maxIterations: 10, // Scouts are fast and focused
+                tools: SUBAGENT_TOOLS,
+                toolExecutor,
+                isSubAgent: true,
+                onProgress: (msg) => onStatus?.(`  [${scout.id}] ${msg}`),
+                onToolCall,
+                onToolResult,
+                checkCancelled,
+            });
+
+            try {
+                const prompt = scout.buildPrompt(userMessage, workspaceContext);
+                const result = await subAgent.run(prompt);
+
+                // Report completion
+                onToolResult?.('run_subagent', {
+                    success: true,
+                    output: `Scout "${scout.label}" completed (${result.iterations} steps, ${result.toolCalls.length} tools used)`,
+                });
+
+                return {
+                    id: scout.id,
+                    label: scout.label,
+                    content: result.content,
+                    tokens: result.totalTokens,
+                };
+            } catch (error: any) {
+                onToolResult?.('run_subagent', {
+                    success: false,
+                    output: `Scout "${scout.label}" failed: ${error.message}`,
+                });
+
+                return {
+                    id: scout.id,
+                    label: scout.label,
+                    content: `(Scout failed: ${error.message})`,
+                    tokens: 0,
+                };
+            }
+        });
+
+        // Execute ALL scouts in parallel — this is the key speedup
+        return Promise.all(scoutPromises);
+    }
+
+    // ─── Private Helpers ─────────────────────────────────────────────────
+
+    /**
+     * Build the user prompt for edit requests.
+     * Includes the file content, instruction, and selected text so the agent
+     * has full context before it starts reading/editing with tools.
+     */
+    private buildEditUserMessage(
         fileContent: string,
         fileName: string,
         instruction: string,
-        selectedText: string | undefined,
+        selectedText?: string,
     ): string {
+        const relativePath = this.getRelativePath(fileName);
+        const displayPath = relativePath || fileName;
         const ext = fileName.split('.').pop() || '';
         const lineCount = fileContent.split('\n').length;
 
-        let prompt = `## File: ${fileName} (${lineCount} lines, .${ext})\n\n`;
-        prompt += `## Instruction: ${instruction}\n\n`;
+        let message = `I need you to edit the file \`${displayPath}\` (${lineCount} lines, .${ext}).\n\n`;
+        message += `## Instruction\n${instruction}\n\n`;
 
         if (selectedText) {
-            // Find the line numbers of the selected text
             const selStart = fileContent.indexOf(selectedText);
             if (selStart !== -1) {
                 const linesBefore = fileContent.substring(0, selStart).split('\n').length;
                 const selLines = selectedText.split('\n').length;
-                prompt += `## Selected Code (lines ${linesBefore}-${linesBefore + selLines - 1}):\n`;
+                message += `## Selected Code (lines ${linesBefore}-${linesBefore + selLines - 1})\n`;
             } else {
-                prompt += `## Selected Code:\n`;
+                message += `## Selected Code\n`;
             }
-            prompt += '```\n' + selectedText + '\n```\n\n';
+            message += `\`\`\`${ext}\n${selectedText}\n\`\`\`\n\n`;
         }
 
-        // For large files, add line numbers so the model can reference structure
+        message += `## Current File Content\n`;
         if (lineCount > 100) {
-            const numberedContent = fileContent.split('\n')
+            const numbered = fileContent.split('\n')
                 .map((line, i) => `${String(i + 1).padStart(4)} | ${line}`)
                 .join('\n');
-            prompt += `## Full File (with line numbers for reference):\n\`\`\`\n${numberedContent}\n\`\`\`\n`;
+            message += `\`\`\`${ext}\n${numbered}\n\`\`\`\n`;
         } else {
-            prompt += `## Full File:\n\`\`\`\n${fileContent}\n\`\`\`\n`;
+            message += `\`\`\`${ext}\n${fileContent}\n\`\`\`\n`;
         }
 
-        prompt += `\nRemember: oldText must be EXACT substrings from the file above. Do not include line numbers in oldText.`;
+        message += `\nUse the read_file tool first to get the exact current content of \`${displayPath}\`, `;
+        message += `then use edit_file with precise oldText/newText pairs to make the changes. `;
+        message += `After editing, use get_diagnostics to verify the changes don't introduce errors.`;
 
-        return prompt;
+        return message;
     }
 
-    // ─── Validation ──────────────────────────────────────────────────────
-
     /**
-     * Validate that all oldText values in the edit response actually exist in the file.
+     * Extract individual {oldText, newText} edits from edit_file tool calls
+     * that targeted a specific file path.
      */
-    private validateEditResponse(
-        response: string,
-        fileContent: string,
-    ): { valid: boolean; missingTexts: string[] } {
-        try {
-            let jsonStr = response.trim();
-            const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
-            if (jsonMatch) { jsonStr = jsonMatch[1].trim(); }
+    private extractEditsFromToolCalls(
+        result: AgentLoopResult,
+        targetPath: string,
+    ): Array<{ oldText: string; newText: string }> {
+        const edits: Array<{ oldText: string; newText: string }> = [];
 
-            const parsed = JSON.parse(jsonStr);
-            if (!parsed.edits || !Array.isArray(parsed.edits)) {
-                return { valid: false, missingTexts: ['[Response missing "edits" array]'] };
-            }
+        for (const tc of result.toolCalls) {
+            if (tc.name !== 'edit_file') { continue; }
+            if (!this.pathsMatch(tc.args.path, targetPath)) { continue; }
 
-            const missing: string[] = [];
-            for (const edit of parsed.edits) {
-                if (!edit.oldText) { continue; } // Append-only edits are valid
-                if (!fileContent.includes(edit.oldText)) {
-                    missing.push(edit.oldText);
+            const tcEdits = tc.args.edits;
+            if (Array.isArray(tcEdits)) {
+                for (const edit of tcEdits) {
+                    if (edit.oldText !== undefined && edit.newText !== undefined) {
+                        edits.push({
+                            oldText: String(edit.oldText),
+                            newText: String(edit.newText),
+                        });
+                    }
                 }
             }
+        }
 
-            return { valid: missing.length === 0, missingTexts: missing };
+        return edits;
+    }
+
+    /**
+     * Revert a file to its original content.
+     * Uses the VS Code editor API when possible (preserves undo stack),
+     * falls back to direct file system write.
+     */
+    private async revertFile(
+        filePath: string,
+        originalContent: string,
+    ): Promise<void> {
+        try {
+            const uri = vscode.Uri.file(filePath);
+
+            // Try to revert through the editor API for undo support
+            const doc = await vscode.workspace.openTextDocument(uri);
+            const editor = await vscode.window.showTextDocument(doc, {
+                preview: false,
+                preserveFocus: true,
+            });
+
+            const fullRange = new vscode.Range(
+                doc.positionAt(0),
+                doc.positionAt(doc.getText().length),
+            );
+
+            await editor.edit((editBuilder) => {
+                editBuilder.replace(fullRange, originalContent);
+            });
         } catch {
-            return { valid: false, missingTexts: ['[Invalid JSON in response]'] };
+            // Fallback: write directly to disk
+            try {
+                const uri = vscode.Uri.file(filePath);
+                await vscode.workspace.fs.writeFile(
+                    uri,
+                    Buffer.from(originalContent, 'utf-8')
+                );
+            } catch {
+                // Best-effort — if we can't revert, the caller's applyEdits
+                // will fail gracefully on oldText mismatch.
+            }
         }
     }
 
@@ -527,58 +717,73 @@ export class SubAgentService {
     // ─── LLM Call ────────────────────────────────────────────────────────
 
     /**
-     * Single LLM call — non-streaming, returns content + token count.
+     * Convert an absolute file path to workspace-relative.
      */
-    private llmCall(opts: LLMCallOptions): Promise<{ content: string; tokens: number }> {
-        return new Promise((resolve, reject) => {
-            const body = JSON.stringify({
-                model: opts.model,
-                messages: [
-                    { role: 'system', content: opts.system },
-                    { role: 'user', content: opts.user },
-                ],
-                temperature: opts.temperature,
-                max_tokens: opts.maxTokens,
-                top_p: opts.topP,
-                stream: false,
-            });
+    private getRelativePath(absolutePath: string): string {
+        const workspaceRoot =
+            vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        if (workspaceRoot && absolutePath.startsWith(workspaceRoot)) {
+            return absolutePath.slice(workspaceRoot.length + 1);
+        }
+        return absolutePath;
+    }
 
-            const reqOpts: https.RequestOptions = {
-                hostname: DEEPSEEK_API_BASE,
-                port: 443,
-                path: '/chat/completions',
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${opts.apiKey}`,
-                    'Content-Length': Buffer.byteLength(body),
-                },
-            };
+    /**
+     * Map an AgentLoopResult to the backward-compatible OrchestratedResponse.
+     */
+    private mapToOrchestratedResponse(
+        result: AgentLoopResult,
+    ): OrchestratedResponse {
+        return {
+            content: result.content,
+            agentResults: [{
+                role: 'logic' as AgentRole,
+                content: result.content,
+                tokens: result.totalTokens,
+            }],
+            totalTokens: result.totalTokens,
+            agentsUsed: this.inferAgentsUsed(result),
+        };
+    }
 
-            const req = https.request(reqOpts, (res) => {
-                let data = '';
-                res.on('data', (chunk) => { data += chunk; });
-                res.on('end', () => {
-                    try {
-                        if (res.statusCode !== 200) {
-                            const err = JSON.parse(data);
-                            reject(new Error(err.error?.message || `API ${res.statusCode}`));
-                            return;
-                        }
-                        const json = JSON.parse(data);
-                        resolve({
-                            content: json.choices?.[0]?.message?.content || '',
-                            tokens: json.usage?.total_tokens || 0,
-                        });
-                    } catch (e) {
-                        reject(new Error(`Parse error: ${e}`));
-                    }
-                });
-            });
+    /**
+     * Infer which "agent roles" were used based on the tool calls made
+     * during the agentic loop. Maps tool names to legacy role categories
+     * for backward compatibility with the UI.
+     */
+    private inferAgentsUsed(result: AgentLoopResult): AgentRole[] {
+        const roles: Set<AgentRole> = new Set(['logic']);
 
-            req.on('error', (e) => reject(new Error(`Network: ${e.message}`)));
-            req.write(body);
-            req.end();
-        });
+        for (const tc of result.toolCalls) {
+            switch (tc.name) {
+                case 'edit_file':
+                case 'write_file':
+                    roles.add('patterns');
+                    break;
+                case 'grep_search':
+                case 'search_files':
+                case 'read_file':
+                    roles.add('backend');
+                    break;
+                case 'run_command':
+                case 'get_diagnostics':
+                    roles.add('frontend');
+                    break;
+            }
+        }
+
+        if (result.subAgentResults.length > 0) {
+            roles.add('frontend');
+        }
+
+        return Array.from(roles);
+    }
+
+    /**
+     * Truncate a string, appending "..." if it exceeds maxLength.
+     */
+    private truncate(text: string, maxLength: number): string {
+        if (text.length <= maxLength) { return text; }
+        return text.substring(0, maxLength - 3) + '...';
     }
 }

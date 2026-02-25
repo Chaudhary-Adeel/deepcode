@@ -31,3 +31,6 @@ npm-debug.log*
 
 # TypeScript incremental compilation
 *.tsbuildinfo
+
+# DeepCode memory (auto-generated, user-specific)
+.deepcode/
