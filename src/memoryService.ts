@@ -1,20 +1,16 @@
 /**
- * Progressive Memory Service for DeepCode
+ * Progressive Memory Service for DeepCode — v2 (Rich Memory + TF-IDF)
  *
  * Maintains a persistent, evolving "project memory" that grows smarter
  * with each interaction. Stored as `.deepcode/memory.json` in the workspace.
  *
- * Features:
- *   - Project summary (tech stack, architecture, conventions)
- *   - Key file registry with content hashes (detect changes)
- *   - Learned patterns and conventions from past interactions
- *   - Interaction log for context continuity
- *   - Auto-update after each agent loop run
- *   - Compact serialization to minimize token usage
- *
- * The memory is injected into the system prompt so the agent starts
- * each conversation with deep project understanding instead of
- * re-exploring from scratch.
+ * v2 Changes:
+ *   - Rich interaction logging: stores user message, agent response,
+ *     full tool call details with results, sub-agent summaries
+ *   - TF-IDF based similarity search for retrieving relevant past
+ *     interactions given the current query
+ *   - Compact context builder that selects only the most relevant
+ *     past interactions to inject into the prompt
  */
 
 import * as vscode from 'vscode';
@@ -32,7 +28,7 @@ export interface ProjectMemory {
     keyFiles: KeyFileEntry[];
     conventions: string[];
     learnedPatterns: string[];
-    interactionLog: InteractionEntry[];
+    interactions: RichInteraction[];
     fileHashes: Record<string, string>;
 }
 
@@ -49,28 +45,128 @@ export interface KeyFileEntry {
     lastHash: string;
 }
 
-export interface InteractionEntry {
+/** Rich interaction entry — stores full context of what happened */
+export interface RichInteraction {
+    id: string;
     timestamp: string;
-    summary: string;
-    toolsUsed: string[];
+    userMessage: string;
+    agentResponse: string;
+    toolCalls: ToolCallRecord[];
+    subAgentSummaries: string[];
+    filesRead: string[];
     filesModified: string[];
+    searchQueries: string[];
+    /** Pre-computed TF-IDF terms for fast similarity matching */
+    tfidfTerms: Record<string, number>;
+}
+
+export interface ToolCallRecord {
+    tool: string;
+    args: Record<string, any>;
+    result: string;
+    success: boolean;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const MEMORY_DIR = '.deepcode';
 const MEMORY_FILE = '.deepcode/memory.json';
-const MAX_INTERACTIONS = 50;
+const MAX_INTERACTIONS = 100;
 const MAX_CONVENTIONS = 30;
 const MAX_PATTERNS = 30;
 const MAX_KEY_FILES = 40;
 const MAX_ARCHITECTURE_NOTES = 20;
+/** Max chars of context to inject from memory into the prompt */
+const MAX_MEMORY_CONTEXT_CHARS = 6000;
+/** Max chars to store per tool result in memory */
+const MAX_TOOL_RESULT_CHARS = 500;
+/** Top-K most relevant past interactions to retrieve */
+const TOP_K_INTERACTIONS = 5;
+
+// ─── TF-IDF Engine ───────────────────────────────────────────────────────────
+
+/**
+ * Lightweight TF-IDF implementation for finding relevant past interactions.
+ * No external dependencies — pure TypeScript.
+ */
+class TFIDFEngine {
+    private static STOP_WORDS = new Set([
+        'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+        'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+        'should', 'may', 'might', 'shall', 'can', 'need', 'dare', 'ought',
+        'used', 'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by', 'from',
+        'as', 'into', 'through', 'during', 'before', 'after', 'above', 'below',
+        'between', 'out', 'off', 'over', 'under', 'again', 'further', 'then',
+        'once', 'here', 'there', 'when', 'where', 'why', 'how', 'all', 'each',
+        'every', 'both', 'few', 'more', 'most', 'other', 'some', 'such', 'no',
+        'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very',
+        'just', 'because', 'but', 'and', 'or', 'if', 'while', 'that', 'this',
+        'these', 'those', 'what', 'which', 'who', 'whom', 'it', 'its', 'i',
+        'me', 'my', 'we', 'our', 'you', 'your', 'he', 'him', 'his', 'she',
+        'her', 'they', 'them', 'their', 'about', 'up', 'also',
+    ]);
+
+    /** Tokenize text: split camelCase, remove stop words, lowercase */
+    static tokenize(text: string): string[] {
+        const expanded = text
+            .replace(/([a-z])([A-Z])/g, '$1 $2')
+            .replace(/_/g, ' ')
+            .replace(/[^a-zA-Z0-9\s./-]/g, ' ');
+        return expanded.toLowerCase()
+            .split(/\s+/)
+            .filter(w => w.length > 1 && !this.STOP_WORDS.has(w));
+    }
+
+    /** Term frequency, normalized by max frequency */
+    static termFrequency(terms: string[]): Record<string, number> {
+        const tf: Record<string, number> = {};
+        for (const term of terms) { tf[term] = (tf[term] || 0) + 1; }
+        const maxFreq = Math.max(...Object.values(tf), 1);
+        for (const term in tf) { tf[term] = tf[term] / maxFreq; }
+        return tf;
+    }
+
+    /** Compute TF-IDF for a document against all docs */
+    static computeTFIDF(docTerms: string[], allDocs: string[][]): Record<string, number> {
+        const tf = this.termFrequency(docTerms);
+        const n = allDocs.length;
+        const tfidf: Record<string, number> = {};
+        for (const term in tf) {
+            const docsContaining = allDocs.filter(d => d.includes(term)).length;
+            const idf = Math.log(n / (1 + docsContaining));
+            tfidf[term] = tf[term] * idf;
+        }
+        return tfidf;
+    }
+
+    /** Cosine similarity between two TF-IDF vectors */
+    static cosineSimilarity(a: Record<string, number>, b: Record<string, number>): number {
+        let dot = 0, normA = 0, normB = 0;
+        const allTerms = new Set([...Object.keys(a), ...Object.keys(b)]);
+        for (const term of allTerms) {
+            const va = a[term] || 0, vb = b[term] || 0;
+            dot += va * vb; normA += va * va; normB += vb * vb;
+        }
+        const denom = Math.sqrt(normA) * Math.sqrt(normB);
+        return denom === 0 ? 0 : dot / denom;
+    }
+
+    /** Build combined text from an interaction for indexing */
+    static interactionToText(ix: RichInteraction): string {
+        return [
+            ix.userMessage,
+            ix.agentResponse.substring(0, 500),
+            ...ix.filesRead, ...ix.filesModified, ...ix.searchQueries,
+            ...ix.toolCalls.map(tc => `${tc.tool} ${JSON.stringify(tc.args).substring(0, 100)}`),
+        ].join(' ');
+    }
+}
 
 // ─── Default empty memory ────────────────────────────────────────────────────
 
 function createEmptyMemory(): ProjectMemory {
     return {
-        version: 1,
+        version: 2,
         lastUpdated: new Date().toISOString(),
         projectSummary: '',
         techStack: [],
@@ -78,7 +174,7 @@ function createEmptyMemory(): ProjectMemory {
         keyFiles: [],
         conventions: [],
         learnedPatterns: [],
-        interactionLog: [],
+        interactions: [],
         fileHashes: {},
     };
 }
@@ -97,7 +193,7 @@ export class MemoryService {
     // ── Load / Save ──────────────────────────────────────────────────────
 
     /**
-     * Load memory from disk. Returns empty memory if none exists.
+     * Load memory from disk. Migrates v1 → v2 automatically.
      */
     async load(): Promise<ProjectMemory> {
         if (this.memory) { return this.memory; }
@@ -112,8 +208,24 @@ export class MemoryService {
         try {
             const data = await vscode.workspace.fs.readFile(uri);
             const parsed = JSON.parse(Buffer.from(data).toString('utf-8'));
-            // Validate structure
             if (parsed && typeof parsed === 'object' && parsed.version) {
+                // Migrate v1 → v2
+                if (parsed.version === 1 && parsed.interactionLog) {
+                    parsed.version = 2;
+                    parsed.interactions = (parsed.interactionLog || []).map((entry: any, i: number) => ({
+                        id: `migrated-${i}`,
+                        timestamp: entry.timestamp || new Date().toISOString(),
+                        userMessage: entry.summary || '',
+                        agentResponse: '',
+                        toolCalls: (entry.toolsUsed || []).map((t: string) => ({ tool: t, args: {}, result: '', success: true })),
+                        subAgentSummaries: [],
+                        filesRead: [],
+                        filesModified: entry.filesModified || [],
+                        searchQueries: [],
+                        tfidfTerms: {},
+                    }));
+                    delete parsed.interactionLog;
+                }
                 this.memory = parsed as ProjectMemory;
                 return this.memory;
             }
@@ -149,68 +261,96 @@ export class MemoryService {
     // ── Context Injection ────────────────────────────────────────────────
 
     /**
-     * Build a compact context string from memory to inject into the system prompt.
-     * Designed to give the agent instant project understanding.
+     * Build a compact context string from memory with TF-IDF relevance ranking.
+     * Finds the most relevant past interactions for the current query.
      */
-    async getMemoryContext(): Promise<string> {
+    async getMemoryContext(currentQuery?: string): Promise<string> {
         const mem = await this.load();
 
-        // Empty memory — nothing to inject
-        if (!mem.projectSummary && mem.keyFiles.length === 0 && mem.techStack.length === 0) {
+        if (
+            !mem.projectSummary &&
+            mem.keyFiles.length === 0 &&
+            mem.techStack.length === 0 &&
+            (!mem.interactions || mem.interactions.length === 0)
+        ) {
             return '';
         }
 
         const parts: string[] = [];
-        parts.push('## 🧠 Project Memory (persistent across sessions)\n');
+        parts.push('## Project Memory (persistent)\n');
 
         if (mem.projectSummary) {
             parts.push(`**Summary:** ${mem.projectSummary}\n`);
         }
-
         if (mem.techStack.length > 0) {
             parts.push(`**Tech Stack:** ${mem.techStack.join(', ')}\n`);
         }
-
         if (mem.architecture.length > 0) {
             parts.push('**Architecture:**');
-            for (const note of mem.architecture.slice(0, 10)) {
+            for (const note of mem.architecture.slice(0, 8)) {
                 parts.push(`- **${note.component}**: ${note.description} (${note.files.join(', ')})`);
             }
             parts.push('');
         }
-
         if (mem.keyFiles.length > 0) {
             parts.push('**Key Files:**');
-            for (const kf of mem.keyFiles.slice(0, 15)) {
+            for (const kf of mem.keyFiles.slice(0, 12)) {
                 const changed = await this.hasFileChanged(kf.path, kf.lastHash);
-                const marker = changed ? ' ⚠️ CHANGED' : '';
+                const marker = changed ? ' [CHANGED]' : '';
                 parts.push(`- \`${kf.path}\`: ${kf.purpose}${marker}`);
             }
             parts.push('');
         }
-
         if (mem.conventions.length > 0) {
-            parts.push('**Conventions:**');
-            for (const c of mem.conventions.slice(0, 10)) {
-                parts.push(`- ${c}`);
-            }
-            parts.push('');
+            parts.push('**Conventions:** ' + mem.conventions.slice(0, 8).join('; ') + '\n');
         }
 
-        if (mem.learnedPatterns.length > 0) {
-            parts.push('**Learned Patterns:**');
-            for (const p of mem.learnedPatterns.slice(0, 10)) {
-                parts.push(`- ${p}`);
-            }
-            parts.push('');
-        }
+        // ── Relevant Past Interactions (TF-IDF ranked) ──
+        if (mem.interactions && mem.interactions.length > 0 && currentQuery) {
+            const relevant = this.findRelevantInteractions(currentQuery, mem.interactions);
+            if (relevant.length > 0) {
+                parts.push('**Relevant Past Interactions:**');
+                let charBudget = MAX_MEMORY_CONTEXT_CHARS - parts.join('\n').length;
 
-        if (mem.interactionLog.length > 0) {
-            const recent = mem.interactionLog.slice(-5);
+                for (const { interaction, score } of relevant) {
+                    if (charBudget <= 200) { break; }
+                    const date = new Date(interaction.timestamp).toLocaleDateString();
+                    let entry = `\n[${date} | relevance: ${(score * 100).toFixed(0)}%]\n`;
+                    entry += `Q: ${interaction.userMessage.substring(0, 200)}\n`;
+                    if (interaction.agentResponse) {
+                        entry += `A: ${interaction.agentResponse.substring(0, 300)}\n`;
+                    }
+                    if (interaction.toolCalls.length > 0) {
+                        const toolSummary = interaction.toolCalls.slice(0, 5)
+                            .map(tc => {
+                                const argsStr = this.compactArgs(tc.args);
+                                const resultStr = tc.result.substring(0, 150);
+                                return `  ${tc.tool}(${argsStr}) -> ${tc.success ? 'ok' : 'fail'} ${resultStr}`;
+                            }).join('\n');
+                        entry += `Tools:\n${toolSummary}\n`;
+                    }
+                    if (interaction.filesModified.length > 0) {
+                        entry += `Modified: ${interaction.filesModified.join(', ')}\n`;
+                    }
+                    if (interaction.filesRead.length > 0) {
+                        entry += `Read: ${interaction.filesRead.slice(0, 5).join(', ')}\n`;
+                    }
+                    if (entry.length > charBudget) {
+                        entry = entry.substring(0, charBudget - 3) + '...';
+                    }
+                    parts.push(entry);
+                    charBudget -= entry.length;
+                }
+                parts.push('');
+            }
+        } else if (mem.interactions && mem.interactions.length > 0) {
+            const recent = mem.interactions.slice(-3);
             parts.push('**Recent Interactions:**');
-            for (const entry of recent) {
-                const date = new Date(entry.timestamp).toLocaleDateString();
-                parts.push(`- ${date}: ${entry.summary}`);
+            for (const ix of recent) {
+                const date = new Date(ix.timestamp).toLocaleDateString();
+                const tc = ix.toolCalls.length;
+                const fc = ix.filesRead.length + ix.filesModified.length;
+                parts.push(`- ${date}: ${ix.userMessage.substring(0, 100)} (${tc} tools, ${fc} files)`);
             }
             parts.push('');
         }
@@ -218,11 +358,47 @@ export class MemoryService {
         return parts.join('\n');
     }
 
+    // ── TF-IDF Similarity Search ─────────────────────────────────────────
+
+    /**
+     * Find the most relevant past interactions for a given query using TF-IDF.
+     */
+    private findRelevantInteractions(
+        query: string,
+        interactions: RichInteraction[],
+    ): Array<{ interaction: RichInteraction; score: number }> {
+        if (interactions.length === 0) { return []; }
+
+        const queryTerms = TFIDFEngine.tokenize(query);
+        if (queryTerms.length === 0) { return []; }
+
+        const allDocTerms = interactions.map(ix =>
+            TFIDFEngine.tokenize(TFIDFEngine.interactionToText(ix))
+        );
+        allDocTerms.push(queryTerms);
+
+        const queryTFIDF = TFIDFEngine.computeTFIDF(queryTerms, allDocTerms);
+
+        const scored = interactions.map((interaction, i) => {
+            const docTFIDF = Object.keys(interaction.tfidfTerms || {}).length > 0
+                ? interaction.tfidfTerms
+                : TFIDFEngine.computeTFIDF(allDocTerms[i], allDocTerms);
+            const score = TFIDFEngine.cosineSimilarity(queryTFIDF, docTFIDF);
+            return { interaction, score };
+        });
+
+        return scored
+            .filter(s => s.score > 0.05)
+            .sort((a, b) => b.score - a.score)
+            .slice(0, TOP_K_INTERACTIONS);
+    }
+
     // ── Update Operations ────────────────────────────────────────────────
 
     /**
-     * Update memory after an agent interaction.
-     * Called automatically at the end of each agent loop run.
+     * Update memory after an agent interaction with FULL details:
+     * user message, agent response, all tool calls with results,
+     * sub-agent outputs, files touched.
      */
     async updateFromInteraction(
         userMessage: string,
@@ -232,76 +408,100 @@ export class MemoryService {
     ): Promise<void> {
         const mem = await this.load();
 
-        // 1. Log the interaction
+        // Extract file lists
         const filesModified = toolCalls
             .filter(tc => (tc.name === 'write_file' || tc.name === 'edit_file') && tc.success)
             .map(tc => tc.args.path as string)
             .filter(Boolean);
 
-        const toolsUsed = [...new Set(toolCalls.map(tc => tc.name))];
-
-        const summary = this.summarizeInteraction(userMessage, toolsUsed, filesModified);
-
-        mem.interactionLog.push({
-            timestamp: new Date().toISOString(),
-            summary,
-            toolsUsed,
-            filesModified,
-        });
-
-        // Trim old interactions
-        if (mem.interactionLog.length > MAX_INTERACTIONS) {
-            mem.interactionLog = mem.interactionLog.slice(-MAX_INTERACTIONS);
-        }
-
-        // 2. Update file hashes for modified files
-        for (const fp of filesModified) {
-            const hash = await this.hashFile(fp);
-            if (hash) {
-                mem.fileHashes[fp] = hash;
-            }
-        }
-
-        // 3. Auto-discover key files from tool calls
         const filesRead = toolCalls
             .filter(tc => tc.name === 'read_file' && tc.success)
             .map(tc => tc.args.path as string)
             .filter(Boolean);
 
+        const searchQueries = toolCalls
+            .filter(tc => tc.name === 'grep_search' || tc.name === 'search_files' || tc.name === 'web_search')
+            .map(tc => (tc.args.query || tc.args.pattern || '') as string)
+            .filter(Boolean);
+
+        // Build tool call records (truncate large results for storage)
+        const toolRecords: ToolCallRecord[] = toolCalls.map(tc => ({
+            tool: tc.name,
+            args: this.compactToolArgs(tc.args),
+            result: tc.result.substring(0, MAX_TOOL_RESULT_CHARS),
+            success: tc.success,
+        }));
+
+        // Sub-agent summaries
+        const subAgentSummaries = subAgentResults.map(sa =>
+            `[${sa.task.substring(0, 100)}]: ${sa.content.substring(0, 300)}`
+        );
+
+        // Build text for TF-IDF indexing
+        const interactionText = [
+            userMessage, agentResponse.substring(0, 500),
+            ...filesRead, ...filesModified, ...searchQueries,
+        ].join(' ');
+
+        // Compute TF-IDF terms
+        const allDocTerms = (mem.interactions || []).map(ix =>
+            TFIDFEngine.tokenize(TFIDFEngine.interactionToText(ix))
+        );
+        const newTerms = TFIDFEngine.tokenize(interactionText);
+        allDocTerms.push(newTerms);
+        const tfidfTerms = TFIDFEngine.computeTFIDF(newTerms, allDocTerms);
+
+        const interaction: RichInteraction = {
+            id: crypto.randomBytes(8).toString('hex'),
+            timestamp: new Date().toISOString(),
+            userMessage,
+            agentResponse: agentResponse.substring(0, 2000),
+            toolCalls: toolRecords,
+            subAgentSummaries,
+            filesRead: [...new Set(filesRead)],
+            filesModified: [...new Set(filesModified)],
+            searchQueries,
+            tfidfTerms,
+        };
+
+        if (!mem.interactions) { mem.interactions = []; }
+        mem.interactions.push(interaction);
+
+        if (mem.interactions.length > MAX_INTERACTIONS) {
+            mem.interactions = mem.interactions.slice(-MAX_INTERACTIONS);
+        }
+
+        // Update file hashes
+        for (const fp of filesModified) {
+            const hash = await this.hashFile(fp);
+            if (hash) { mem.fileHashes[fp] = hash; }
+        }
+
+        // Auto-discover key files
         for (const fp of filesRead) {
             if (!mem.keyFiles.find(kf => kf.path === fp)) {
-                const purpose = this.inferFilePurpose(fp, toolCalls);
+                const purpose = this.inferFilePurpose(fp);
                 const hash = await this.hashFile(fp);
                 if (hash) {
-                    mem.keyFiles.push({
-                        path: fp,
-                        purpose,
-                        exports: [],
-                        lastHash: hash,
-                    });
+                    mem.keyFiles.push({ path: fp, purpose, exports: [], lastHash: hash });
                 }
             }
         }
-
-        // Trim key files
         if (mem.keyFiles.length > MAX_KEY_FILES) {
             mem.keyFiles = mem.keyFiles.slice(-MAX_KEY_FILES);
         }
 
-        // 4. Extract conventions and patterns from the response
+        // Extract patterns
         this.extractPatterns(mem, agentResponse, toolCalls);
 
-        // 5. Auto-detect tech stack if not yet populated
+        // Auto-detect tech stack
         if (mem.techStack.length === 0) {
-            const detectedStack = await this.detectTechStack();
-            if (detectedStack.length > 0) {
-                mem.techStack = detectedStack;
-            }
+            mem.techStack = await this.detectTechStack();
         }
 
-        // 6. Auto-generate project summary if empty
+        // Auto-generate summary
         if (!mem.projectSummary && mem.keyFiles.length >= 3) {
-            mem.projectSummary = await this.generateProjectSummary(mem);
+            mem.projectSummary = this.generateProjectSummary(mem);
         }
 
         this.memory = mem;
@@ -406,49 +606,59 @@ export class MemoryService {
         }
     }
 
-    private summarizeInteraction(
-        userMessage: string,
-        toolsUsed: string[],
-        filesModified: string[],
-    ): string {
-        const msg = userMessage.substring(0, 80).replace(/\n/g, ' ');
-        const parts = [msg];
-        if (filesModified.length > 0) {
-            parts.push(`modified: ${filesModified.join(', ')}`);
+    /** Compact tool args for storage — truncate large values */
+    private compactToolArgs(args: Record<string, any>): Record<string, any> {
+        const compact: Record<string, any> = {};
+        for (const [key, value] of Object.entries(args)) {
+            if (typeof value === 'string' && value.length > 200) {
+                if (key === 'content' || key === 'newText' || key === 'oldText') {
+                    compact[key] = `[${value.length} chars]`;
+                } else {
+                    compact[key] = value.substring(0, 200) + '...';
+                }
+            } else {
+                compact[key] = value;
+            }
         }
-        if (toolsUsed.length > 0) {
-            parts.push(`tools: ${toolsUsed.join(', ')}`);
-        }
-        return parts.join(' | ');
+        return compact;
     }
 
-    private inferFilePurpose(
-        filePath: string,
-        toolCalls: Array<{ name: string; args: Record<string, any>; result: string }>,
-    ): string {
+    /** Compact args for display in context injection */
+    private compactArgs(args: Record<string, any>): string {
+        const parts: string[] = [];
+        for (const [key, value] of Object.entries(args)) {
+            const strVal = typeof value === 'string' ? value : JSON.stringify(value);
+            if (strVal.length > 50) {
+                parts.push(`${key}="${strVal.substring(0, 50)}..."`);
+            } else {
+                parts.push(`${key}="${strVal}"`);
+            }
+        }
+        return parts.join(', ');
+    }
+
+    private inferFilePurpose(filePath: string): string {
         const ext = path.extname(filePath);
         const name = path.basename(filePath, ext);
 
-        // Heuristic purpose inference
         if (name.includes('test') || name.includes('spec')) { return 'Test file'; }
         if (name === 'package' && ext === '.json') { return 'Package manifest'; }
-        if (name === 'tsconfig' || name === 'jsconfig') { return 'TypeScript/JS config'; }
+        if (name === 'tsconfig' || name === 'jsconfig') { return 'TS/JS config'; }
         if (name.includes('config') || name.includes('rc')) { return 'Configuration'; }
         if (name === 'index' || name === 'main' || name === 'app') { return 'Entry point'; }
         if (name.includes('service') || name.includes('Service')) { return 'Service module'; }
-        if (name.includes('controller') || name.includes('Controller')) { return 'Controller'; }
+        if (name.includes('controller')) { return 'Controller'; }
         if (name.includes('model') || name.includes('Model')) { return 'Data model'; }
-        if (name.includes('util') || name.includes('helper')) { return 'Utility module'; }
+        if (name.includes('util') || name.includes('helper')) { return 'Utility'; }
         if (name.includes('type') || name.includes('interface')) { return 'Type definitions'; }
         if (name.includes('route') || name.includes('router')) { return 'Routing'; }
         if (name.includes('middleware')) { return 'Middleware'; }
-        if (name.includes('component') || name.includes('Component')) { return 'UI component'; }
+        if (name.includes('component')) { return 'UI component'; }
         if (name.includes('hook') || name.includes('use')) { return 'React hook'; }
         if (name.includes('store') || name.includes('reducer')) { return 'State management'; }
-        if (ext === '.css' || ext === '.scss' || ext === '.less') { return 'Styles'; }
+        if (ext === '.css' || ext === '.scss') { return 'Styles'; }
         if (ext === '.md') { return 'Documentation'; }
-        if (name === 'Dockerfile' || name === 'docker-compose') { return 'Docker config'; }
-
+        if (name === 'Dockerfile') { return 'Docker config'; }
         return `Source file (${ext})`;
     }
 
@@ -546,22 +756,17 @@ export class MemoryService {
         return [...new Set(stack)];
     }
 
-    private async generateProjectSummary(mem: ProjectMemory): Promise<string> {
+    private generateProjectSummary(mem: ProjectMemory): string {
         const parts: string[] = [];
-
         if (mem.techStack.length > 0) {
             parts.push(`${mem.techStack.join(', ')} project`);
         }
-
         if (mem.keyFiles.length > 0) {
-            parts.push(`with ${mem.keyFiles.length} key files analyzed`);
+            parts.push(`${mem.keyFiles.length} key files`);
         }
-
         if (mem.architecture.length > 0) {
-            const components = mem.architecture.map(a => a.component).join(', ');
-            parts.push(`components: ${components}`);
+            parts.push(`components: ${mem.architecture.map(a => a.component).join(', ')}`);
         }
-
         return parts.join(' — ') || 'Project analyzed';
     }
 }

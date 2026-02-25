@@ -131,7 +131,7 @@ export class SubAgentService {
 
         // Build workspace context and populate system prompt
         const workspaceContext = await contextManager.buildWorkspaceContext();
-        const memoryContext = await memoryService.getMemoryContext();
+        const memoryContext = await memoryService.getMemoryContext(userMessage);
         let enrichedContext = workspaceContext;
         if (memoryContext) {
             enrichedContext = `${memoryContext}\n\n${workspaceContext}`;
@@ -333,7 +333,7 @@ export class SubAgentService {
 
         // Load progressive memory for project understanding
         onStatus?.('Loading project memory...');
-        const memoryContext = await memoryService.getMemoryContext();
+        const memoryContext = await memoryService.getMemoryContext(userMessage);
         const hasMemory = !!memoryContext;
 
         // Inject memory into system prompt
