@@ -3,8 +3,25 @@ import { DeepSeekService } from './deepseekService';
 import { FileEditorService } from './fileEditorService';
 import { SidebarProvider } from './sidebarProvider';
 import { SubAgentService } from './subAgentService';
+import { DirtyTracker } from './dirtyTracker';
+import { IndexEngine } from './indexEngine';
+import { SymbolGraph } from './symbolGraph';
+import { CodeSearch } from './codeSearch';
 
 let sidebarProvider: SidebarProvider;
+let statusBarItem: vscode.StatusBarItem;
+
+// Singleton references for cross-module access
+let indexEngineInstance: IndexEngine | undefined;
+let symbolGraphInstance: SymbolGraph | undefined;
+let codeSearchInstance: CodeSearch | undefined;
+
+/** Get the global IndexEngine instance (undefined if no workspace) */
+export function getIndexEngine(): IndexEngine | undefined { return indexEngineInstance; }
+/** Get the global SymbolGraph instance (undefined if no workspace) */
+export function getSymbolGraph(): SymbolGraph | undefined { return symbolGraphInstance; }
+/** Get the global CodeSearch instance (undefined if no workspace) */
+export function getCodeSearch(): CodeSearch | undefined { return codeSearchInstance; }
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('DeepCode extension is now active!');
@@ -12,6 +29,73 @@ export function activate(context: vscode.ExtensionContext) {
     const deepseekService = new DeepSeekService();
     const fileEditorService = new FileEditorService();
     const subAgentService = new SubAgentService();
+
+    // ── Status Bar Item ──────────────────────────────────────────────────
+    statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    statusBarItem.text = '$(symbol-misc) DeepCode: ready';
+    statusBarItem.tooltip = 'DeepCode AI Coding Assistant';
+    statusBarItem.command = 'deepcode.openSettings';
+    statusBarItem.show();
+    context.subscriptions.push(statusBarItem);
+
+    // Initialize Dirty Tracker + Index Engine + Symbol Graph + Embeddings
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (workspaceRoot) {
+        const dirtyTracker = new DirtyTracker(workspaceRoot);
+        context.subscriptions.push(dirtyTracker);
+
+        const indexEngine = new IndexEngine(workspaceRoot, context.extensionPath, dirtyTracker);
+        context.subscriptions.push(indexEngine);
+        indexEngineInstance = indexEngine;
+
+        const symbolGraph = new SymbolGraph(indexEngine);
+        symbolGraphInstance = symbolGraph;
+
+        const codeSearch = new CodeSearch(workspaceRoot);
+        context.subscriptions.push(codeSearch);
+        codeSearchInstance = codeSearch;
+
+        // Track indexing progress in status bar
+        indexEngine.onDidProgress(({ indexed, total }) => {
+            const pct = Math.round((indexed / total) * 100);
+            statusBarItem.text = `$(sync~spin) DeepCode: indexing ${pct}%`;
+        });
+
+        // Initialize pipeline: dirty tracker → index engine → code search (fire-and-forget)
+        dirtyTracker.initialize().then(() => {
+            indexEngine.initialize().then(() => {
+                // Load symbol graph from cached entries
+                const cachedMap = indexEngine.getAllCached();
+                symbolGraph.loadFromCache(cachedMap);
+                // Load code search from cached entries
+                codeSearch.initialize().then(() => {
+                    codeSearch.loadFromEntries(Array.from(cachedMap.values()));
+                }).catch(() => {});
+                // Update status bar
+                const dirtyCount = dirtyTracker.getDirtyCount();
+                statusBarItem.text = dirtyCount > 0
+                    ? `$(symbol-misc) DeepCode: ready (${dirtyCount} dirty)`
+                    : '$(symbol-misc) DeepCode: ready';
+            }).catch(err => {
+                console.error('DeepCode: IndexEngine init failed:', err);
+                statusBarItem.text = '$(warning) DeepCode: index error';
+            });
+        });
+
+        // Rebuild symbol graph + code search whenever a file is indexed
+        indexEngine.onDidIndex(entry => {
+            symbolGraph.updateFromEntry(entry);
+            codeSearch.updateFromEntry(entry);
+        });
+
+        // Update status bar when dirty count changes
+        dirtyTracker.onDidChange(() => {
+            const count = dirtyTracker.getDirtyCount();
+            statusBarItem.text = count > 0
+                ? `$(symbol-misc) DeepCode: ready (${count} dirty)`
+                : '$(symbol-misc) DeepCode: ready';
+        });
+    }
 
     // Register Sidebar Webview
     sidebarProvider = new SidebarProvider(
@@ -265,6 +349,100 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
+    // Command: Rebuild Symbol Index
+    context.subscriptions.push(
+        vscode.commands.registerCommand('deepcode.rebuildIndex', async () => {
+            if (!indexEngineInstance) {
+                vscode.window.showWarningMessage('DeepCode: No workspace open — cannot rebuild index.');
+                return;
+            }
+
+            await vscode.window.withProgress(
+                {
+                    location: vscode.ProgressLocation.Notification,
+                    title: 'DeepCode: Rebuilding symbol index...',
+                    cancellable: true,
+                },
+                async (_progress, token) => {
+                    statusBarItem.text = '$(sync~spin) DeepCode: rebuilding...';
+                    await indexEngineInstance!.rebuildAll(token);
+                    if (symbolGraphInstance) {
+                        symbolGraphInstance.loadFromCache(indexEngineInstance!.getAllCached());
+                    }
+                    statusBarItem.text = '$(symbol-misc) DeepCode: ready';
+                    vscode.window.showInformationMessage('DeepCode: Symbol index rebuilt successfully.');
+                }
+            );
+        })
+    );
+
+    // Command: Fix Selected Code with AI
+    context.subscriptions.push(
+        vscode.commands.registerCommand('deepcode.fixCode', async () => {
+            const apiKey = await deepseekService.getApiKey(context);
+            if (!apiKey) {
+                vscode.window.showErrorMessage('DeepCode: No API key configured.');
+                return;
+            }
+
+            const editor = vscode.window.activeTextEditor;
+            if (!editor || editor.selection.isEmpty) {
+                vscode.window.showErrorMessage('DeepCode: Please select the code with the issue.');
+                return;
+            }
+
+            const editorContent = fileEditorService.getActiveEditorContent();
+            if (!editorContent || !editorContent.selection) { return; }
+
+            // Get diagnostics for the selected range
+            const diagnostics = vscode.languages.getDiagnostics(editor.document.uri)
+                .filter(d => editor.selection.contains(d.range))
+                .map(d => `${d.severity === 0 ? 'Error' : 'Warning'}: ${d.message} (line ${d.range.start.line + 1})`)
+                .join('\n');
+
+            const instruction = diagnostics
+                ? `Fix the following issues in the selected code:\n${diagnostics}`
+                : 'Fix any bugs, errors, or issues in the selected code.';
+
+            await vscode.window.withProgress(
+                {
+                    location: vscode.ProgressLocation.Notification,
+                    title: 'DeepCode: Fixing code...',
+                    cancellable: false,
+                },
+                async (progress) => {
+                    try {
+                        const cfg = deepseekService.getConfig();
+                        const result = await subAgentService.orchestrateEdit(
+                            apiKey,
+                            cfg.model,
+                            editorContent.content,
+                            editorContent.fileName,
+                            instruction,
+                            editorContent.selection,
+                            cfg.temperature,
+                            cfg.topP,
+                            (status) => { progress.report({ message: status }); },
+                        );
+
+                        const editResult = result.editResult || fileEditorService.parseEditResponse(result.content);
+                        const action = await vscode.window.showInformationMessage(
+                            `DeepCode Fix [${result.agentsUsed.join(', ')}]: ${editResult.explanation}`,
+                            'Apply',
+                            'Cancel'
+                        );
+
+                        if (action === 'Apply') {
+                            await fileEditorService.applyEdits(editor.document, editResult);
+                        }
+                    } catch (error: any) {
+                        vscode.window.showErrorMessage(`DeepCode: ${error.message}`);
+                    }
+                }
+            );
+        })
+    );
+
     // Check for API key on startup and prompt if not set
     (async () => {
         const apiKey = await deepseekService.getApiKey(context);
@@ -282,5 +460,6 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {
+    statusBarItem?.dispose();
     console.log('DeepCode extension deactivated.');
 }

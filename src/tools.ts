@@ -392,6 +392,146 @@ export const AGENT_TOOLS: ToolDefinition[] = [
             },
         },
     },
+
+    // ─── Symbol Graph Tools ───────────────────────────────────────────
+    {
+        type: 'function',
+        function: {
+            name: 'search_symbol',
+            description:
+                'Search for a symbol (function, class, interface, type, enum, variable) by name across the workspace. ' +
+                'Uses the AST-powered symbol graph for accurate results. Returns definitions with file, line, and signature. ' +
+                'Supports fuzzy matching — partial names work.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    name: {
+                        type: 'string',
+                        description: 'Symbol name to search for (exact or partial match)',
+                    },
+                    limit: {
+                        type: 'number',
+                        description: 'Maximum number of results (default: 20)',
+                    },
+                },
+                required: ['name'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'find_references',
+            description:
+                'Find all references to a symbol across the workspace: definitions, imports, and re-exports. ' +
+                'Uses the AST-powered symbol graph for structural accuracy (not text-based grep). ' +
+                'Returns each reference with file path, line number, and reference kind.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    symbol: {
+                        type: 'string',
+                        description: 'The exact symbol name to find references for',
+                    },
+                },
+                required: ['symbol'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'get_file_skeleton',
+            description:
+                'Get a lightweight skeleton of a file: signatures, class names, type declarations — no function bodies. ' +
+                'Typically ~10% of the full file size. Read skeletons first to understand structure before reading full files. ' +
+                'Supports multiple files at once.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    paths: {
+                        type: 'array',
+                        items: { type: 'string' },
+                        description: 'Array of relative file paths to get skeletons for',
+                    },
+                },
+                required: ['paths'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'run_verify',
+            description:
+                'Run a verification command (tsc, eslint, tests) against the workspace and return structured results. ' +
+                'Uses the deepcode.verifyCommand setting, or auto-detects from package.json scripts. ' +
+                'Timeout: 30 seconds. Returns pass/fail status and parsed error messages.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    command: {
+                        type: 'string',
+                        description: 'Optional override command to run (defaults to configured verify command)',
+                    },
+                },
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'semantic_search',
+            description:
+                'Search the codebase using natural language. Uses TF-IDF over AST-chunked code ' +
+                '(functions, classes, methods) to find relevant symbols by meaning, not just exact text. ' +
+                'Good for queries like "error handling", "database connection", "authentication logic". ' +
+                'Returns ranked results with symbol signatures, file paths, and relevance scores.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    query: {
+                        type: 'string',
+                        description: 'Natural language search query describing the code you are looking for',
+                    },
+                    limit: {
+                        type: 'number',
+                        description: 'Maximum results to return (default: 10)',
+                    },
+                },
+                required: ['query'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'search_external_references',
+            description:
+                'Search GitHub for real-world code examples using a library, API, or pattern. ' +
+                'Great for finding usage patterns of unfamiliar libraries, seeing how others implement similar features, ' +
+                'or verifying best practices. Returns code snippets from public repositories. ' +
+                'Optionally filter by language.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    query: {
+                        type: 'string',
+                        description: 'Search query — library names, function calls, patterns (e.g., "useEffect cleanup React", "express middleware error handling")',
+                    },
+                    language: {
+                        type: 'string',
+                        description: 'Programming language filter (e.g., "typescript", "javascript", "python")',
+                    },
+                    maxResults: {
+                        type: 'number',
+                        description: 'Maximum results to return (default: 5, max: 10)',
+                    },
+                },
+                required: ['query'],
+            },
+        },
+    },
 ];
 
 /**
@@ -445,6 +585,18 @@ export class ToolExecutor {
                     return await this.webSearch(args.query, args.maxResults || 5);
                 case 'fetch_webpage':
                     return await this.fetchWebpage(args.url, args.maxLength || 15000);
+                case 'search_symbol':
+                    return await this.searchSymbol(args.name, args.limit || 20);
+                case 'find_references':
+                    return await this.findReferences(args.symbol);
+                case 'get_file_skeleton':
+                    return await this.getFileSkeleton(args.paths || []);
+                case 'run_verify':
+                    return await this.runVerify(args.command);
+                case 'semantic_search':
+                    return await this.semanticSearch(args.query, args.limit || 10);
+                case 'search_external_references':
+                    return await this.searchExternalReferences(args.query, args.language, args.maxResults || 5);
                 default:
                     return { success: false, output: `Unknown tool: ${name}` };
             }
@@ -479,6 +631,10 @@ export class ToolExecutor {
         endLine?: number
     ): Promise<ToolCallResult> {
         const fullPath = this.resolvePath(filePath);
+
+        // Trigger lazy re-index (non-blocking, fire-and-forget)
+        this.triggerLazyIndex(filePath).catch(() => {});
+
         const uri = vscode.Uri.file(fullPath);
         const contentBytes = await vscode.workspace.fs.readFile(uri);
         const text = Buffer.from(contentBytes).toString('utf-8');
@@ -1221,6 +1377,300 @@ export class ToolExecutor {
             req.on('timeout', () => {
                 req.destroy();
                 reject(new Error('Request timed out'));
+            });
+        });
+    }
+
+    // ─── read_file lazy re-index trigger ─────────────────────────────────
+
+    private async triggerLazyIndex(filePath: string): Promise<void> {
+        try {
+            const { getIndexEngine } = require('./extension') as typeof import('./extension');
+            const engine = getIndexEngine();
+            if (engine) {
+                await engine.getEntry(filePath);
+            }
+        } catch {
+            // Non-critical — skip silently
+        }
+    }
+
+    // ─── run_verify ──────────────────────────────────────────────────────
+
+    private async runVerify(command?: string): Promise<ToolCallResult> {
+        const verifyCmd = command
+            || vscode.workspace.getConfiguration('deepcode').get<string>('verifyCommand')
+            || 'npx tsc --noEmit';
+
+        return new Promise<ToolCallResult>((resolve) => {
+            const child = cp.exec(verifyCmd, {
+                cwd: this.workspaceRoot,
+                timeout: 30_000,
+                maxBuffer: 1024 * 1024,
+            }, (error, stdout, stderr) => {
+                const output = (stdout + '\n' + stderr).trim();
+                if (error) {
+                    // Parse error lines for structured output
+                    const errorLines = output.split('\n').filter(l => /error\s+TS|Error:|FAIL/i.test(l));
+                    const summary = errorLines.length > 0
+                        ? `FAIL — ${errorLines.length} error(s):\n${errorLines.slice(0, 20).join('\n')}`
+                        : `FAIL — ${output.substring(0, 2000)}`;
+                    resolve({ success: false, output: summary });
+                } else {
+                    resolve({ success: true, output: `PASS — ${verifyCmd} completed successfully.\n${output.substring(0, 500)}` });
+                }
+            });
+
+            child.on('error', (err) => {
+                resolve({ success: false, output: `Failed to run verify command: ${err.message}` });
+            });
+        });
+    }
+
+    // ─── search_symbol ───────────────────────────────────────────────────
+
+    private async searchSymbol(name: string, limit: number): Promise<ToolCallResult> {
+        const { getSymbolGraph, getIndexEngine } = require('./extension') as typeof import('./extension');
+        const graph = getSymbolGraph();
+        const indexEngine = getIndexEngine();
+
+        if (!graph || !indexEngine) {
+            return { success: false, output: 'Symbol graph not available (no workspace open or indexing not initialized).' };
+        }
+
+        const results = graph.searchSymbols(name, limit);
+
+        if (results.length === 0) {
+            return {
+                success: true,
+                output: `No symbols found matching "${name}".`,
+            };
+        }
+
+        const lines = results.map(sym => {
+            const loc = `${sym.filepath}:${sym.line + 1}`;
+            return `${sym.signature}\n  at ${loc}`;
+        });
+
+        return {
+            success: true,
+            output: `Found ${results.length} symbol(s) matching "${name}":\n\n${lines.join('\n\n')}`,
+        };
+    }
+
+    // ─── find_references ─────────────────────────────────────────────────
+
+    private async findReferences(symbolName: string): Promise<ToolCallResult> {
+        const { getSymbolGraph } = require('./extension') as typeof import('./extension');
+        const graph = getSymbolGraph();
+
+        if (!graph) {
+            return { success: false, output: 'Symbol graph not available (no workspace open or indexing not initialized).' };
+        }
+
+        const refs = graph.findReferences(symbolName);
+
+        if (refs.length === 0) {
+            return {
+                success: true,
+                output: `No references found for "${symbolName}".`,
+            };
+        }
+
+        const lines = refs.map(ref => {
+            const sym = ref.symbol;
+            const loc = `${sym.filepath}:${sym.line + 1}`;
+            return `[${ref.kind}] ${sym.signature}\n  at ${loc}`;
+        });
+
+        return {
+            success: true,
+            output: `Found ${refs.length} reference(s) for "${symbolName}":\n\n${lines.join('\n\n')}`,
+        };
+    }
+
+    // ─── semantic_search ──────────────────────────────────────────────────
+
+    private async semanticSearch(query: string, limit: number): Promise<ToolCallResult> {
+        const { getCodeSearch } = require('./extension') as typeof import('./extension');
+        const codeSearch = getCodeSearch();
+
+        if (!codeSearch) {
+            return { success: false, output: 'Code search not available (no workspace open or indexing not initialized).' };
+        }
+
+        const results = codeSearch.search(query, limit);
+
+        if (results.length === 0) {
+            return {
+                success: true,
+                output: `No code found matching "${query}". Try different terms or use grep_search for exact text matches.`,
+            };
+        }
+
+        const lines = results.map((r, i) => {
+            const loc = `${r.chunk.filepath}:${r.chunk.startLine}`;
+            return `${i + 1}. [${r.score}] ${r.chunk.kind} ${r.chunk.symbolName}\n   ${r.chunk.preview}\n   at ${loc}`;
+        });
+
+        return {
+            success: true,
+            output: `Found ${results.length} result(s) for "${query}":\n\n${lines.join('\n\n')}`,
+        };
+    }
+
+    // ─── get_file_skeleton ───────────────────────────────────────────────
+
+    private async getFileSkeleton(paths: string[]): Promise<ToolCallResult> {
+        const { getIndexEngine } = require('./extension') as typeof import('./extension');
+        const indexEngine = getIndexEngine();
+
+        if (!indexEngine) {
+            return { success: false, output: 'Index engine not available (no workspace open or indexing not initialized).' };
+        }
+
+        if (paths.length === 0) {
+            return { success: false, output: 'No file paths provided.' };
+        }
+
+        const sections: string[] = [];
+        for (const fp of paths) {
+            const skeleton = await indexEngine.getSkeleton(fp);
+            if (skeleton) {
+                sections.push(`=== ${fp} ===\n${skeleton}`);
+            } else {
+                sections.push(`=== ${fp} ===\n(not indexable or file not found)`);
+            }
+        }
+
+        return {
+            success: true,
+            output: sections.join('\n\n'),
+        };
+    }
+
+    // ─── search_external_references ──────────────────────────────────────
+
+    private async searchExternalReferences(
+        query: string,
+        language?: string,
+        maxResults = 5,
+    ): Promise<ToolCallResult> {
+        const limit = Math.min(maxResults || 5, 10);
+
+        // Build GitHub Code Search query
+        let searchQuery = query;
+        if (language) {
+            searchQuery += ` language:${language}`;
+        }
+
+        const encodedQuery = encodeURIComponent(searchQuery);
+        const apiUrl = `https://api.github.com/search/code?q=${encodedQuery}&per_page=${limit}`;
+
+        try {
+            const raw = await this.githubApiGet(apiUrl);
+            const data = JSON.parse(raw);
+
+            if (!data.items || data.items.length === 0) {
+                return {
+                    success: true,
+                    output: `No external code references found for "${query}". ` +
+                        'Try broader terms or check the library/API name.',
+                };
+            }
+
+            const results: string[] = [];
+
+            for (const item of data.items.slice(0, limit)) {
+                const repo = item.repository?.full_name || 'unknown';
+                const filePath = item.path || '';
+                const htmlUrl = item.html_url || '';
+                const score = (item.score || 0).toFixed(1);
+
+                // Fetch file content snippet (first 150 lines to save tokens)
+                let snippet = '';
+                try {
+                    if (item.url) {
+                        const fileRaw = await this.githubApiGet(item.url);
+                        const fileData = JSON.parse(fileRaw);
+                        if (fileData.content && fileData.encoding === 'base64') {
+                            const decoded = Buffer.from(fileData.content, 'base64').toString('utf-8');
+                            const lines = decoded.split('\n').slice(0, 80);
+                            snippet = lines.join('\n');
+                            if (decoded.split('\n').length > 80) {
+                                snippet += '\n// ... (truncated)';
+                            }
+                        }
+                    }
+                } catch {
+                    snippet = '(could not fetch file content)';
+                }
+
+                results.push(
+                    `── ${repo} ── ${filePath}\n` +
+                    `   URL: ${htmlUrl}\n` +
+                    `   Relevance: ${score}\n` +
+                    (snippet ? `\`\`\`\n${snippet}\n\`\`\`\n` : ''),
+                );
+            }
+
+            return {
+                success: true,
+                output: `Found ${data.items.length} external reference(s) for "${query}":\n\n${results.join('\n')}`,
+            };
+        } catch (error: any) {
+            // Graceful fallback: if GitHub API fails (rate limit, no token), use web search
+            if (error.message?.includes('403') || error.message?.includes('401') || error.message?.includes('rate limit')) {
+                return this.webSearch(`${query} site:github.com code example`, limit);
+            }
+            return {
+                success: false,
+                output: `GitHub code search failed: ${error.message}. ` +
+                    'For authenticated access with higher rate limits, set GITHUB_TOKEN environment variable.',
+            };
+        }
+    }
+
+    /**
+     * GitHub API GET request with optional token auth.
+     */
+    private githubApiGet(url: string): Promise<string> {
+        return new Promise((resolve, reject) => {
+            const headers: Record<string, string> = {
+                'User-Agent': 'DeepCode-VSCode/1.0',
+                'Accept': 'application/vnd.github.v3+json',
+            };
+
+            // Use GITHUB_TOKEN env var if available for higher rate limits
+            const token = process.env.GITHUB_TOKEN;
+            if (token) {
+                headers['Authorization'] = `Bearer ${token}`;
+            }
+
+            const req = https.get(url, { headers, timeout: 15_000 }, (res) => {
+                if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                    this.githubApiGet(res.headers.location).then(resolve).catch(reject);
+                    res.resume();
+                    return;
+                }
+
+                if (res.statusCode !== 200) {
+                    res.resume();
+                    reject(new Error(`GitHub API HTTP ${res.statusCode}`));
+                    return;
+                }
+
+                let data = '';
+                res.setEncoding('utf-8');
+                res.on('data', (chunk: string) => { data += chunk; });
+                res.on('end', () => resolve(data));
+                res.on('error', reject);
+            });
+
+            req.on('error', reject);
+            req.on('timeout', () => {
+                req.destroy();
+                reject(new Error('GitHub API request timed out'));
             });
         });
     }
