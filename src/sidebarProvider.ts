@@ -3653,7 +3653,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     showProcessBar(data.status);
                     // Skip adding generic/duplicate statuses to the activity feed
                     var statusText = data.status || '';
-                    var isGeneric = statusText === 'Thinking...' || statusText === 'Working on it...' || statusText === 'Working on your request...';
+                    var isGeneric = statusText === 'Working on it...';
                     // Add step to inline activity feed
                     var afeed = document.getElementById('activityFeed');
                     if (afeed && !afeed.classList.contains('collapsed') && !isGeneric) {

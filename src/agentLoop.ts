@@ -214,7 +214,20 @@ export class AgentLoop {
             if (iteration === 1) {
                 this.opts.onProgress?.('Analyzing your request...');
             } else {
-                this.opts.onProgress?.('Thinking...');
+                // Give users descriptive progress instead of generic "Thinking..."
+                const toolsSoFar = this.toolCallLog.length;
+                const lastTool = toolsSoFar > 0 ? this.toolCallLog[toolsSoFar - 1] : null;
+                let progressMsg: string;
+                if (lastTool && !lastTool.success) {
+                    progressMsg = `Recovering from ${lastTool.name} issue, retrying...`;
+                } else if (toolsSoFar === 0) {
+                    progressMsg = 'Analyzing your request...';
+                } else if (toolsSoFar < 3) {
+                    progressMsg = `Reviewing results (step ${iteration}, ${toolsSoFar} tool calls so far)...`;
+                } else {
+                    progressMsg = `Continuing work (step ${iteration}, ${toolsSoFar} tool calls so far)...`;
+                }
+                this.opts.onProgress?.(progressMsg);
             }
 
             let response;
