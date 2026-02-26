@@ -3415,6 +3415,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             s = s.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
             // Italic
             s = s.replace(/\\*(.+?)\\*/g, '<em>$1</em>');
+            // Newlines → line breaks so text after labels like "Reasoning:" starts on its own line
+            s = s.replace(/\\n/g, '<br>');
             return s;
         }
 
