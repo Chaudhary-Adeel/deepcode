@@ -48,6 +48,11 @@ const IGNORED_DIRS = new Set([
 
 const EXCLUDE_GLOB = '{**/node_modules/**,**/.git/**,**/out/**,**/dist/**,**/__pycache__/**,**/.deepcode/**}';
 
+/** Extensions that the index engine can actually parse — only these should be dirty-tracked */
+const INDEXABLE_EXTENSIONS = new Set([
+    '.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs',
+]);
+
 // ─── DirtyTracker ────────────────────────────────────────────────────────────
 
 export class DirtyTracker implements vscode.Disposable {
@@ -195,6 +200,9 @@ export class DirtyTracker implements vscode.Disposable {
                 const rel = this.toRelative(uri);
                 if (this.isIgnored(rel)) { continue; }
 
+                // Only track files the index engine can actually process
+                if (!this.isIndexableExtension(rel)) { continue; }
+
                 try {
                     const stat = await vscode.workspace.fs.stat(uri);
                     const mtime = stat.mtime;
@@ -229,6 +237,7 @@ export class DirtyTracker implements vscode.Disposable {
     private onFileChanged(uri: vscode.Uri): void {
         const rel = this.toRelative(uri);
         if (this.isIgnored(rel)) { return; }
+        if (!this.isIndexableExtension(rel)) { return; } // Only track indexable files
         if (this.dirtySet.has(rel)) { return; } // already dirty — no-op
 
         this.dirtySet.add(rel);
@@ -261,5 +270,11 @@ export class DirtyTracker implements vscode.Disposable {
     private isIgnored(relativePath: string): boolean {
         const segments = relativePath.split('/');
         return segments.some(seg => IGNORED_DIRS.has(seg));
+    }
+
+    /** Check if a file has an extension the index engine can process */
+    private isIndexableExtension(filepath: string): boolean {
+        const ext = filepath.substring(filepath.lastIndexOf('.')).toLowerCase();
+        return INDEXABLE_EXTENSIONS.has(ext);
     }
 }

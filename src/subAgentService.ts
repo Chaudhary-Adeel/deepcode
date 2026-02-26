@@ -60,7 +60,12 @@ export interface OrchestratedResponse {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const MAX_ITERATIONS = 8;
+/**
+ * Safety ceiling — NOT a target. The loop ends when the model stops calling tools.
+ * Loop detection kicks in much earlier if the agent gets stuck.
+ * Sub-agents use a tighter limit (see agentLoop sub-agent spawn).
+ */
+const MAX_ITERATIONS = 200;
 const DEFAULT_MAX_TOKENS = 4096;
 
 // ─── Service Implementation ─────────────────────────────────────────────────
@@ -335,10 +340,18 @@ export class SubAgentService {
         const wordCount = userMessage.split(/\s+/).length;
         const hasAttachedContent = !!context && context.length > 100;
         const isSimpleFollowUp = conversationHistory && conversationHistory.length > 2;
-        const isTrivial = wordCount < 12 && !userMessage.includes('file') &&
-            !userMessage.includes('code') && !userMessage.includes('edit') &&
-            !userMessage.includes('fix');
-        const skipPipeline = hasAttachedContent || isSimpleFollowUp || isTrivial;
+        const isTrivial = wordCount < 20;
+        const isSimpleEdit = wordCount < 40 && (
+            userMessage.toLowerCase().includes('edit') ||
+            userMessage.toLowerCase().includes('change') ||
+            userMessage.toLowerCase().includes('update') ||
+            userMessage.toLowerCase().includes('rename') ||
+            userMessage.toLowerCase().includes('add') ||
+            userMessage.toLowerCase().includes('remove') ||
+            userMessage.toLowerCase().includes('delete') ||
+            userMessage.toLowerCase().includes('fix')
+        );
+        const skipPipeline = hasAttachedContent || isSimpleFollowUp || isTrivial || isSimpleEdit;
 
         let intent: IntentResult | undefined;
         let plan: PlanResult | undefined;
@@ -765,9 +778,9 @@ export class SubAgentService {
             message += `\`\`\`${ext}\n${fileContent}\n\`\`\`\n`;
         }
 
-        message += `\nUse the read_file tool first to get the exact current content of \`${displayPath}\`, `;
-        message += `then use edit_file with precise oldText/newText pairs to make the changes. `;
-        message += `After editing, use get_diagnostics to verify the changes don't introduce errors.`;
+        message += `\nIMPORTANT: The file content above is ALREADY the current content — do NOT read_file again. `;
+        message += `Use edit_file with precise oldText/newText pairs to make the changes directly. `;
+        message += `Diagnostics are checked automatically after edit_file — no need to call get_diagnostics manually.`;
 
         return message;
     }

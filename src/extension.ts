@@ -61,6 +61,14 @@ export function activate(context: vscode.ExtensionContext) {
             statusBarItem.text = `$(sync~spin) DeepCode: indexing ${pct}%`;
         });
 
+        // Reset status bar when indexing finishes
+        indexEngine.onDidComplete(() => {
+            const dirtyCount = dirtyTracker.getDirtyCount();
+            statusBarItem.text = dirtyCount > 0
+                ? `$(symbol-misc) DeepCode: ready (${dirtyCount} dirty)`
+                : '$(symbol-misc) DeepCode: ready';
+        });
+
         // Initialize pipeline: dirty tracker → index engine → code search (fire-and-forget)
         dirtyTracker.initialize().then(() => {
             indexEngine.initialize().then(() => {

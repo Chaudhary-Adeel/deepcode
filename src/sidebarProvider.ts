@@ -3651,9 +3651,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 case 'agentStatus': {
                     showProcessBar(data.status);
+                    // Skip adding generic/duplicate statuses to the activity feed
+                    var statusText = data.status || '';
+                    var isGeneric = statusText === 'Thinking...' || statusText === 'Working on it...' || statusText === 'Working on your request...';
                     // Add step to inline activity feed
                     var afeed = document.getElementById('activityFeed');
-                    if (afeed && !afeed.classList.contains('collapsed')) {
+                    if (afeed && !afeed.classList.contains('collapsed') && !isGeneric) {
                         // Mark previous step as done
                         var prevStep = afeed.querySelector('.activity-step.current');
                         if (prevStep) {
