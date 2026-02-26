@@ -25,6 +25,7 @@ Powered by DeepSeek.
 ## How It Works
 
 ```mermaid
+%%{init: { 'securityLevel': 'loose', 'theme': 'default', 'themeVariables': { 'primaryColor': '#fff', 'primaryTextColor': '#fff', 'primaryBorderColor': '#007acc', 'lineColor': '#007acc', 'secondaryColor': '#006400', 'tertiaryColor': '#fff' }, 'flowchart': { 'useMaxWidth': false, 'htmlLabels': true, 'curve': 'basis' } } }%%
 flowchart TD
     A["💬 You type a request"] --> B["🧠 Intent Agent"]
     B -->|Simple task| D["⚡ Generator"]

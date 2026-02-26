@@ -8,6 +8,15 @@
 ## System Overview
 
 ```mermaid
+---
+config:
+  theme: default
+  flowchart:
+    useMaxWidth: true
+  securityLevel: 'loose'
+  zoom:
+    enabled: false
+---
 graph LR
     subgraph "VS Code Extension Host"
         EXT["extension.ts<br/>Activation & Wiring"]
@@ -188,6 +197,15 @@ Assembles context for agent prompts and enforces token budgets.
 The orchestrator (`SubAgentService`) routes every request through a multi-agent pipeline:
 
 ```mermaid
+---
+config:
+  theme: default
+  sequenceDiagram:
+    useMaxWidth: true
+  securityLevel: 'loose'
+  zoom:
+    enabled: false
+---
 sequenceDiagram
     participant U as User
     participant O as Orchestrator
@@ -295,6 +313,15 @@ All persistent data lives in `.deepcode/` at the workspace root:
 ### 10. Extension Lifecycle
 
 ```mermaid
+---
+config:
+  theme: default
+  flowchart:
+    useMaxWidth: true
+  securityLevel: 'loose'
+  zoom:
+    enabled: false
+---
 flowchart TD
     A["activate()"] --> B["Create DirtyTracker"]
     B --> C["Create IndexEngine"]

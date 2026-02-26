@@ -110,6 +110,10 @@ export class IndexEngine implements vscode.Disposable {
     private readonly _onDidProgress = new vscode.EventEmitter<{ indexed: number; total: number }>();
     public readonly onDidProgress = this._onDidProgress.event;
 
+    private readonly _onDidComplete = new vscode.EventEmitter<void>();
+    /** Fires when background indexing finishes */
+    public readonly onDidComplete = this._onDidComplete.event;
+
     private readonly _onDidIndex = new vscode.EventEmitter<IndexEntry>();
     public readonly onDidIndex = this._onDidIndex.event;
 
@@ -172,6 +176,7 @@ export class IndexEngine implements vscode.Disposable {
         this.disposed = true;
 
         this._onDidProgress.dispose();
+        this._onDidComplete.dispose();
         this._onDidIndex.dispose();
 
         if (this.saveTimer) {
@@ -1004,7 +1009,10 @@ export class IndexEngine implements vscode.Disposable {
 
     private async backgroundIndex(token?: vscode.CancellationToken): Promise<void> {
         const dirty = this.dirtyTracker.getDirty().filter(fp => this.isIndexable(fp));
-        if (dirty.length === 0) { return; }
+        if (dirty.length === 0) {
+            this._onDidComplete.fire();
+            return;
+        }
 
         const total = dirty.length;
         let indexed = 0;
@@ -1025,6 +1033,9 @@ export class IndexEngine implements vscode.Disposable {
             // Yield to event loop
             await new Promise(resolve => setTimeout(resolve, 0));
         }
+
+        // Signal completion so status bar can update
+        this._onDidComplete.fire();
     }
 
     // ─── Persistence ─────────────────────────────────────────────────────

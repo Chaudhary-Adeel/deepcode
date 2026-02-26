@@ -50,6 +50,11 @@ export interface AgentLoopOptions {
     temperature: number;
     topP: number;
     maxTokens: number;
+    /**
+     * Safety ceiling for iterations. NOT a target — just a last-resort guard.
+     * The loop normally ends when the model stops calling tools.
+     * Loop detection will kick in much earlier if the agent is stuck.
+     */
     maxIterations: number;
     tools: ToolDefinition[];
     toolExecutor: ToolExecutor;
@@ -62,6 +67,22 @@ export interface AgentLoopOptions {
     /** Depth guard — prevents sub-agents from spawning more sub-agents */
     isSubAgent?: boolean;
 }
+
+/** Fingerprint a tool call for loop detection */
+function toolCallFingerprint(name: string, args: Record<string, any>): string {
+    // Normalize args: sort keys, truncate long values
+    const normalized: Record<string, any> = {};
+    for (const key of Object.keys(args).sort()) {
+        const val = args[key];
+        normalized[key] = typeof val === 'string' && val.length > 200
+            ? val.substring(0, 200)
+            : val;
+    }
+    return `${name}:${JSON.stringify(normalized)}`;
+}
+
+/** Max times the same tool call (name+args) can repeat before we consider it a loop */
+const MAX_IDENTICAL_TOOL_CALLS = 3;
 
 export interface AgentLoopResult {
     content: string;
@@ -97,23 +118,24 @@ export const AGENT_SYSTEM_PROMPT = `You are DeepCode — an expert AI coding age
 
 You think → use tools → observe → repeat until done. Be autonomous — use tools instead of asking the user.
 
-## Speed Rules
-- For SIMPLE questions (explanations, summaries, concepts): answer DIRECTLY from context without using tools. If you already have enough context, just respond immediately.
-- For questions about attached/open files: the content is already in the prompt — read it and answer. Do NOT re-read files you already have.
-- Only use tools when you genuinely need information not already provided.
-- Use read_file, grep_search, list_directory directly — only use run_subagent for truly complex multi-file tasks.
+## Speed Rules — READ THIS FIRST
+- If file content is ALREADY in the prompt, NEVER call read_file on it again. Use the content you have.
+- For SIMPLE questions: answer DIRECTLY without using any tools.
+- For SIMPLE edits (1-3 changes): call edit_file IMMEDIATELY with the content already provided. Do NOT explore, search, or read first.
+- Keep tool usage minimal — 1-3 calls for simple tasks, more only for genuinely complex multi-file work.
 - Prefer multiple tool calls in ONE response over spawning sub-agents.
-- Keep tool usage minimal — 1-3 calls for most tasks.
 
 ## Tool Strategy
-1. Check if you can answer from provided context FIRST.
-2. If not, use the fewest tools needed to get the answer.
-3. For understanding code: use get_file_skeleton FIRST to see structure, then read_file only for specific sections you need.
-4. For finding code: use semantic_search for natural language queries, search_symbol for known names, grep_search for exact text.
-5. For edits: read_file → edit_file → get_diagnostics. That's it.
-6. For multi-file edits: use multi_edit_files to edit several files in one call.
-7. For truly complex multi-file tasks: use run_subagent to parallelize.
-8. Use web_search only when workspace info is insufficient.
+1. Check if you can answer or act from provided context FIRST. If file content is in the prompt, you already have it.
+2. If not, use the fewest tools needed.
+3. For understanding code: use get_file_skeleton FIRST, then read_file for specific sections.
+4. For finding code: use semantic_search for natural language, search_symbol for names, grep_search for exact text.
+5. For edits when file content is provided: edit_file directly. Do NOT read_file first — you already have the content.
+6. For edits when file content is NOT provided: read_file → edit_file. That's it.
+7. Diagnostics run automatically after edit_file — do NOT call get_diagnostics manually unless fixing reported errors.
+8. For multi-file edits: use multi_edit_files to edit several files in one call.
+9. For truly complex multi-file tasks: use run_subagent to parallelize.
+10. Use web_search only when workspace info is insufficient.
 
 ## Response Quality
 - Be direct. Lead with the answer.
@@ -122,12 +144,13 @@ You think → use tools → observe → repeat until done. Be autonomous — use
 - NEVER mention sub-agents, scouts, tools, or internal mechanics. Present findings naturally.
 
 ## Edit Rules
-- oldText must be verbatim from the file
-- Always read_file before edit_file
-- Include enough context for a unique match
-- After edits, diagnostics are automatically reported — if errors appear, fix them immediately in the next step
-- Be progressive: apply edits, check the auto-diagnostics, fix any issues, repeat until clean
+- oldText must be verbatim from the file (copy exact text including whitespace)
+- If the file content is already in the prompt, use it directly — do NOT read_file again
+- Only read_file before edit_file when you DON'T already have the file content
+- Include enough surrounding context in oldText for a unique match
+- Diagnostics run automatically after each edit_file — if errors appear, fix them in the next step
 - For changes spanning multiple files, prefer multi_edit_files over separate edit_file calls
+- For simple edits: just call edit_file and respond. Do not over-think it.
 
 ## Error Recovery
 - If a tool call fails, read the error message carefully and retry with corrected arguments.
@@ -179,6 +202,7 @@ export class AgentLoop {
 
         let iteration = 0;
         let consecutiveApiErrors = 0;
+        const toolCallCounts = new Map<string, number>(); // fingerprint → count
 
         while (iteration < this.opts.maxIterations) {
             if (this.opts.checkCancelled?.()) {
@@ -186,10 +210,11 @@ export class AgentLoop {
             }
 
             iteration++;
+
             if (iteration === 1) {
                 this.opts.onProgress?.('Analyzing your request...');
             } else {
-                this.opts.onProgress?.('Working on it...');
+                this.opts.onProgress?.('Thinking...');
             }
 
             let response;
@@ -229,6 +254,48 @@ export class AgentLoop {
                     content: message.content,
                     tool_calls: message.tool_calls,
                 });
+
+                // ── Loop detection: check if the agent is repeating itself ──
+                let loopDetected = false;
+                for (const tc of message.tool_calls) {
+                    let args: Record<string, any> = {};
+                    try { args = JSON.parse(tc.function.arguments); } catch { /* */ }
+                    const fp = toolCallFingerprint(tc.function.name, args);
+                    const count = (toolCallCounts.get(fp) || 0) + 1;
+                    toolCallCounts.set(fp, count);
+                    if (count >= MAX_IDENTICAL_TOOL_CALLS) {
+                        loopDetected = true;
+                    }
+                }
+
+                if (loopDetected) {
+                    // Break out of the loop — the agent is stuck
+                    this.opts.onProgress?.('Detected repeating actions, wrapping up...');
+                    this.messages.push({
+                        role: 'user',
+                        content: '[SYSTEM: You are repeating the same tool calls. STOP using tools and respond with what you have accomplished so far.]',
+                    });
+                    // Force one more API call without tools
+                    const savedTools = this.opts.tools;
+                    this.opts.tools = [];
+                    try {
+                        const forceResp = await this.callAPI(!!this.opts.onToken);
+                        this.totalTokens += forceResp.tokens;
+                        this.opts.tools = savedTools;
+                        if (forceResp.message.content) {
+                            return {
+                                content: forceResp.message.content,
+                                totalTokens: this.totalTokens,
+                                toolCalls: this.toolCallLog,
+                                iterations: iteration,
+                                subAgentResults: this.subAgentResults,
+                            };
+                        }
+                    } catch {
+                        this.opts.tools = savedTools;
+                    }
+                    break;
+                }
 
                 // Execute all tool calls in parallel
                 const toolCount = message.tool_calls.length;
@@ -297,11 +364,17 @@ export class AgentLoop {
                     })
                 );
 
-                // Add tool results to message history
+                // Add tool results to message history (truncated to prevent payload bloat)
+                const MAX_TOOL_OUTPUT_IN_HISTORY = 8000;
                 for (const { id, result } of toolResults) {
+                    let output = result.output;
+                    if (output.length > MAX_TOOL_OUTPUT_IN_HISTORY) {
+                        output = output.substring(0, MAX_TOOL_OUTPUT_IN_HISTORY) +
+                            `\n\n[... truncated ${output.length - MAX_TOOL_OUTPUT_IN_HISTORY} chars to keep payload lean]`;
+                    }
                     this.messages.push({
                         role: 'tool',
-                        content: result.output,
+                        content: output,
                         tool_call_id: id,
                     });
                 }
@@ -317,12 +390,43 @@ export class AgentLoop {
             }
         }
 
-        // Exceeded max iterations
+        // Exceeded max iterations — force a final text response without tools
         this.opts.onProgress?.('Wrapping up...');
+
+        try {
+            // One last API call with tools disabled to force a text summary
+            this.messages.push({
+                role: 'user',
+                content: '[SYSTEM: Maximum iterations reached. Respond NOW with a summary of what you accomplished. Do NOT call any tools.]',
+            });
+            const savedTools = this.opts.tools;
+            this.opts.tools = []; // Disable tools to force text response
+            const finalResponse = await this.callAPI(!!this.opts.onToken);
+            this.opts.tools = savedTools;
+            this.totalTokens += finalResponse.tokens;
+
+            if (finalResponse.message.content) {
+                // Stream the final response if streaming is enabled
+                if (this.opts.onToken && finalResponse.message.content) {
+                    // Content was already streamed via onToken in callAPI
+                }
+                return {
+                    content: finalResponse.message.content,
+                    totalTokens: this.totalTokens,
+                    toolCalls: this.toolCallLog,
+                    iterations: iteration,
+                    subAgentResults: this.subAgentResults,
+                };
+            }
+        } catch {
+            // If the final summary call also fails, fall through to generic message
+        }
+
         return {
             content:
-                'I reached the maximum number of tool-use iterations for this task. ' +
-                'Here is what I accomplished so far — you may want to continue the conversation for remaining work.',
+                'I used all available iterations for this task. ' +
+                `Here is what I did: ${this.toolCallLog.length} tool call(s) across ${iteration} steps. ` +
+                'You may want to continue the conversation for remaining work.',
             totalTokens: this.totalTokens,
             toolCalls: this.toolCallLog,
             iterations: iteration,
@@ -427,7 +531,7 @@ export class AgentLoop {
             temperature: this.opts.temperature,
             topP: this.opts.topP,
             maxTokens: this.opts.maxTokens,
-            maxIterations: 5, // Sub-agents must be fast
+            maxIterations: 25, // Sub-agents get a reasonable budget
             tools: SUBAGENT_TOOLS,
             toolExecutor: this.opts.toolExecutor,
             isSubAgent: true,
@@ -517,6 +621,9 @@ export class AgentLoop {
                     'Content-Length': Buffer.byteLength(body),
                 },
             };
+
+            // Timeout: kill the request if it takes too long
+            const API_TIMEOUT_MS = 90_000; // 90 seconds
 
             const req = https.request(reqOpts, (res) => {
                 if (useStream) {
@@ -627,6 +734,9 @@ export class AgentLoop {
             req.on('error', (e) =>
                 reject(new Error(`Network error: ${e.message}`))
             );
+            req.setTimeout(API_TIMEOUT_MS, () => {
+                req.destroy(new Error(`API request timed out after ${API_TIMEOUT_MS / 1000}s. The model may be overloaded — try again.`));
+            });
             req.write(body);
             req.end();
         });

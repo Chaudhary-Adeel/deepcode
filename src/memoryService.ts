@@ -56,8 +56,10 @@ export interface RichInteraction {
     filesRead: string[];
     filesModified: string[];
     searchQueries: string[];
-    /** Pre-computed TF-IDF terms for fast similarity matching */
-    tfidfTerms: Record<string, number>;
+    /** Pre-computed TF-IDF terms for fast similarity matching (optional, can be recomputed) */
+    tfidfTerms?: Record<string, number>;
+    /** Whether this interaction has been compacted (old entries get trimmed) */
+    compacted?: boolean;
 }
 
 export interface ToolCallRecord {
@@ -71,17 +73,27 @@ export interface ToolCallRecord {
 
 const MEMORY_DIR = '.deepcode';
 const MEMORY_FILE = '.deepcode/memory.json';
-const MAX_INTERACTIONS = 100;
-const MAX_CONVENTIONS = 30;
-const MAX_PATTERNS = 30;
-const MAX_KEY_FILES = 40;
-const MAX_ARCHITECTURE_NOTES = 20;
+const MAX_INTERACTIONS = 50;
+const MAX_CONVENTIONS = 20;
+const MAX_PATTERNS = 20;
+const MAX_KEY_FILES = 30;
+const MAX_ARCHITECTURE_NOTES = 15;
 /** Max chars of context to inject from memory into the prompt */
 const MAX_MEMORY_CONTEXT_CHARS = 6000;
 /** Max chars to store per tool result in memory */
-const MAX_TOOL_RESULT_CHARS = 500;
+const MAX_TOOL_RESULT_CHARS = 300;
 /** Top-K most relevant past interactions to retrieve */
 const TOP_K_INTERACTIONS = 5;
+/** Max bytes for memory.json before aggressive compaction kicks in */
+const MAX_MEMORY_FILE_BYTES = 512 * 1024; // 512 KB
+/** After how many interactions do we compact old entries */
+const COMPACT_THRESHOLD = 30;
+/** Max chars for user message stored in interactions */
+const MAX_USER_MSG_CHARS = 500;
+/** Max chars for agent response stored in interactions */
+const MAX_AGENT_RESPONSE_CHARS = 500;
+/** Max tool calls stored per interaction */
+const MAX_TOOL_CALLS_PER_INTERACTION = 8;
 
 // ─── TF-IDF Engine ───────────────────────────────────────────────────────────
 
@@ -238,7 +250,7 @@ export class MemoryService {
     }
 
     /**
-     * Save memory to disk.
+     * Save memory to disk. Enforces file size limits.
      */
     async save(): Promise<void> {
         if (!this.memory || !this.workspaceRoot) { return; }
@@ -253,9 +265,78 @@ export class MemoryService {
             await vscode.workspace.fs.createDirectory(dirUri);
         }
 
+        // Compact old interactions to keep file size manageable
+        this.compactOldInteractions();
+
+        let json = JSON.stringify(this.memory, null, 2);
+
+        // If still too large, aggressively prune
+        if (Buffer.byteLength(json, 'utf-8') > MAX_MEMORY_FILE_BYTES) {
+            this.aggressivePrune();
+            json = JSON.stringify(this.memory, null, 2);
+        }
+
         const memUri = vscode.Uri.file(path.join(this.workspaceRoot, MEMORY_FILE));
-        const json = JSON.stringify(this.memory, null, 2);
         await vscode.workspace.fs.writeFile(memUri, Buffer.from(json, 'utf-8'));
+    }
+
+    /**
+     * Compact old interactions — strip TF-IDF terms, trim responses,
+     * and reduce tool call details for interactions beyond the compact threshold.
+     */
+    private compactOldInteractions(): void {
+        if (!this.memory?.interactions) { return; }
+        const total = this.memory.interactions.length;
+        if (total <= COMPACT_THRESHOLD) { return; }
+
+        // Keep the last COMPACT_THRESHOLD interactions full; compact the rest
+        const cutoff = total - COMPACT_THRESHOLD;
+        for (let i = 0; i < cutoff; i++) {
+            const ix = this.memory.interactions[i];
+            if (ix.compacted) { continue; }
+
+            // Strip TF-IDF (will be recomputed on demand)
+            delete ix.tfidfTerms;
+
+            // Trim stored text
+            ix.userMessage = ix.userMessage.substring(0, 200);
+            ix.agentResponse = ix.agentResponse.substring(0, 200);
+
+            // Keep only tool names, drop args and results
+            ix.toolCalls = ix.toolCalls.slice(0, 5).map(tc => ({
+                tool: tc.tool,
+                args: {},
+                result: '',
+                success: tc.success,
+            }));
+
+            ix.subAgentSummaries = ix.subAgentSummaries.slice(0, 2).map(s => s.substring(0, 100));
+            ix.searchQueries = ix.searchQueries.slice(0, 3);
+            ix.compacted = true;
+        }
+    }
+
+    /**
+     * Aggressive pruning when file size exceeds limits.
+     * Drops the oldest half of interactions entirely.
+     */
+    private aggressivePrune(): void {
+        if (!this.memory?.interactions) { return; }
+        const half = Math.ceil(this.memory.interactions.length / 2);
+        this.memory.interactions = this.memory.interactions.slice(half);
+
+        // Also trim other growing collections
+        if (this.memory.keyFiles.length > 20) {
+            this.memory.keyFiles = this.memory.keyFiles.slice(-20);
+        }
+        if (this.memory.learnedPatterns.length > 15) {
+            this.memory.learnedPatterns = this.memory.learnedPatterns.slice(-15);
+        }
+
+        // Strip remaining TF-IDF terms
+        for (const ix of this.memory.interactions) {
+            delete ix.tfidfTerms;
+        }
     }
 
     // ── Context Injection ────────────────────────────────────────────────
@@ -380,9 +461,8 @@ export class MemoryService {
         const queryTFIDF = TFIDFEngine.computeTFIDF(queryTerms, allDocTerms);
 
         const scored = interactions.map((interaction, i) => {
-            const docTFIDF = Object.keys(interaction.tfidfTerms || {}).length > 0
-                ? interaction.tfidfTerms
-                : TFIDFEngine.computeTFIDF(allDocTerms[i], allDocTerms);
+            // Always recompute TF-IDF on demand (no longer stored inline)
+            const docTFIDF = TFIDFEngine.computeTFIDF(allDocTerms[i], allDocTerms);
             const score = TFIDFEngine.cosineSimilarity(queryTFIDF, docTFIDF);
             return { interaction, score };
         });
@@ -432,36 +512,22 @@ export class MemoryService {
             success: tc.success,
         }));
 
-        // Sub-agent summaries
-        const subAgentSummaries = subAgentResults.map(sa =>
-            `[${sa.task.substring(0, 100)}]: ${sa.content.substring(0, 300)}`
+        // Sub-agent summaries (trimmed for storage)
+        const subAgentSummaries = subAgentResults.slice(0, 3).map(sa =>
+            `[${sa.task.substring(0, 80)}]: ${sa.content.substring(0, 200)}`
         );
-
-        // Build text for TF-IDF indexing
-        const interactionText = [
-            userMessage, agentResponse.substring(0, 500),
-            ...filesRead, ...filesModified, ...searchQueries,
-        ].join(' ');
-
-        // Compute TF-IDF terms
-        const allDocTerms = (mem.interactions || []).map(ix =>
-            TFIDFEngine.tokenize(TFIDFEngine.interactionToText(ix))
-        );
-        const newTerms = TFIDFEngine.tokenize(interactionText);
-        allDocTerms.push(newTerms);
-        const tfidfTerms = TFIDFEngine.computeTFIDF(newTerms, allDocTerms);
 
         const interaction: RichInteraction = {
             id: crypto.randomBytes(8).toString('hex'),
             timestamp: new Date().toISOString(),
-            userMessage,
-            agentResponse: agentResponse.substring(0, 2000),
-            toolCalls: toolRecords,
+            userMessage: userMessage.substring(0, MAX_USER_MSG_CHARS),
+            agentResponse: agentResponse.substring(0, MAX_AGENT_RESPONSE_CHARS),
+            toolCalls: toolRecords.slice(0, MAX_TOOL_CALLS_PER_INTERACTION),
             subAgentSummaries,
             filesRead: [...new Set(filesRead)],
             filesModified: [...new Set(filesModified)],
-            searchQueries,
-            tfidfTerms,
+            searchQueries: searchQueries.slice(0, 5),
+            // TF-IDF terms are NOT stored inline — recomputed on demand to save space
         };
 
         if (!mem.interactions) { mem.interactions = []; }
