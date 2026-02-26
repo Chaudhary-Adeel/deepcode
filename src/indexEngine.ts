@@ -81,6 +81,8 @@ const INDEXABLE_EXTENSIONS = new Set([
     '.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs',
 ]);
 
+const EXCLUDE_GLOB = '{**/node_modules/**,**/.git/**,**/out/**,**/dist/**,**/__pycache__/**,**/.deepcode/**}';
+
 // ─── IndexEngine ─────────────────────────────────────────────────────────────
 
 export class IndexEngine implements vscode.Disposable {
@@ -285,7 +287,20 @@ export class IndexEngine implements vscode.Disposable {
 
     async rebuildAll(token?: vscode.CancellationToken): Promise<void> {
         this.cache.clear();
+        this.importersMap.clear();
         await this.ensureInitialized();
+
+        try {
+            const files = await vscode.workspace.findFiles('**/*', EXCLUDE_GLOB);
+            for (const uri of files) {
+                const rel = path.relative(this.workspaceRoot, uri.fsPath).replace(/\\/g, '/');
+                if (!this.isIndexable(rel)) { continue; }
+                this.dirtyTracker.markDependencyDirty(rel);
+            }
+        } catch {
+            // Fall back to currently dirty set only
+        }
+
         await this.backgroundIndex(token);
     }
 

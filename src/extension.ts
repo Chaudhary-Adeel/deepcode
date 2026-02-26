@@ -33,8 +33,8 @@ export function activate(context: vscode.ExtensionContext) {
     // ── Status Bar Item ──────────────────────────────────────────────────
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     statusBarItem.text = '$(symbol-misc) DeepCode: ready';
-    statusBarItem.tooltip = 'DeepCode AI Coding Assistant';
-    statusBarItem.command = 'deepcode.openSettings';
+    statusBarItem.tooltip = 'Click to re-index dirty files';
+    statusBarItem.command = 'deepcode.rebuildIndex';
     statusBarItem.show();
     context.subscriptions.push(statusBarItem);
 

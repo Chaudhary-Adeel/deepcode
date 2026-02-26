@@ -202,14 +202,14 @@ export const AGENT_TOOLS: ToolDefinition[] = [
                     path: {
                         type: 'string',
                         description:
-                            'Relative path to the directory. Use "" or "." for workspace root.',
+                            'Relative path to the directory. Omit or use "." for workspace root.',
                     },
                     recursive: {
                         type: 'boolean',
                         description: 'List recursively up to 4 levels deep (default: false)',
                     },
                 },
-                required: ['path'],
+                required: [],
             },
         },
     },
@@ -559,15 +559,22 @@ export class ToolExecutor {
         try {
             switch (name) {
                 case 'read_file':
-                    return await this.readFile(args.path, args.startLine, args.endLine);
+                    return await this.readFile(
+                        this.extractPathArg(args),
+                        this.extractNumberArg(args, ['startLine', 'start_line', 'fromLine', 'from_line']),
+                        this.extractNumberArg(args, ['endLine', 'end_line', 'toLine', 'to_line'])
+                    );
                 case 'write_file':
-                    return await this.writeFile(args.path, args.content);
+                    return await this.writeFile(this.extractPathArg(args), this.extractContentArg(args));
                 case 'edit_file':
-                    return await this.editFile(args.path, args.edits || []);
+                    return await this.editFile(this.extractPathArg(args), args.edits || args.changes || []);
                 case 'multi_edit_files':
                     return await this.multiEditFiles(args.files || []);
                 case 'list_directory':
-                    return await this.listDirectory(args.path || '.', args.recursive || false);
+                    return await this.listDirectory(
+                        this.extractPathArg(args, '.'),
+                        Boolean(args.recursive ?? args.deep ?? false)
+                    );
                 case 'search_files':
                     return await this.searchFiles(args.pattern, args.maxResults || 30);
                 case 'grep_search':
@@ -580,7 +587,7 @@ export class ToolExecutor {
                 case 'run_command':
                     return await this.runCommand(args.command, args.timeout || 30000);
                 case 'get_diagnostics':
-                    return await this.getDiagnostics(args.path);
+                    return await this.getDiagnostics(this.extractPathArg(args));
                 case 'web_search':
                     return await this.webSearch(args.query, args.maxResults || 5);
                 case 'fetch_webpage':
@@ -608,19 +615,97 @@ export class ToolExecutor {
         }
     }
 
+    private extractPathArg(args: Record<string, any>, fallback?: string): string {
+        const keys = ['path', 'filePath', 'filepath', 'file_path', 'filename', 'file', 'dirPath', 'directory', 'dir'];
+        for (const key of keys) {
+            if (Object.prototype.hasOwnProperty.call(args, key) && typeof args[key] === 'string') {
+                return args[key];
+            }
+        }
+        return fallback ?? '';
+    }
+
+    private extractContentArg(args: Record<string, any>): string {
+        const keys = ['content', 'text', 'data', 'body'];
+        for (const key of keys) {
+            if (Object.prototype.hasOwnProperty.call(args, key)) {
+                const value = args[key];
+                if (typeof value === 'string') { return value; }
+                if (value === undefined || value === null) { return value as any; }
+                return String(value);
+            }
+        }
+        return (args as any).content;
+    }
+
+    private extractNumberArg(args: Record<string, any>, keys: string[]): number | undefined {
+        for (const key of keys) {
+            if (!Object.prototype.hasOwnProperty.call(args, key)) { continue; }
+            const value = args[key];
+            if (typeof value === 'number' && Number.isFinite(value)) {
+                return value;
+            }
+            if (typeof value === 'string' && value.trim() !== '') {
+                const parsed = Number(value);
+                if (Number.isFinite(parsed)) {
+                    return parsed;
+                }
+            }
+        }
+        return undefined;
+    }
+
     // ─── Path Resolution ─────────────────────────────────────────────────
 
     private resolvePath(relativePath: string): string {
-        if (path.isAbsolute(relativePath)) {
-            // Security: ensure path is within workspace
-            if (!relativePath.startsWith(this.workspaceRoot)) {
+        if (!relativePath) {
+            throw new Error('File path is required but was empty or undefined.');
+        }
+
+        // Decode URL-encoded paths (e.g. %20 → space)
+        let cleanPath = decodeURIComponent(relativePath);
+
+        // Strip leading file:// URI scheme if present
+        if (cleanPath.startsWith('file://')) {
+            cleanPath = cleanPath.replace(/^file:\/\//, '');
+        }
+
+        // If the model sent the full workspace root as a prefix, strip it to get relative
+        if (this.workspaceRoot && cleanPath.startsWith(this.workspaceRoot)) {
+            cleanPath = cleanPath.substring(this.workspaceRoot.length);
+            // Remove any leading separator left over
+            if (cleanPath.startsWith('/') || cleanPath.startsWith('\\')) {
+                cleanPath = cleanPath.substring(1);
+            }
+        }
+
+        // Strip leading ./ (it's redundant but models often emit it)
+        if (cleanPath.startsWith('./') || cleanPath.startsWith('.\\')) {
+            cleanPath = cleanPath.substring(2);
+        }
+
+        if (path.isAbsolute(cleanPath)) {
+            // Security: absolute paths must be inside the workspace
+            const normalized = path.normalize(cleanPath);
+            if (!normalized.startsWith(this.workspaceRoot)) {
                 throw new Error(
-                    `Path "${relativePath}" is outside the workspace. Only workspace-relative paths are allowed.`
+                    `Path "${relativePath}" resolves outside the workspace. Use a relative path instead (e.g. "src/index.ts").`
                 );
             }
-            return relativePath;
+            return normalized;
         }
-        return path.join(this.workspaceRoot, relativePath);
+
+        // Resolve relative path against workspace root and normalize
+        const resolved = path.normalize(path.join(this.workspaceRoot, cleanPath));
+
+        // Security: ensure ../ traversals don't escape the workspace
+        if (!resolved.startsWith(this.workspaceRoot)) {
+            throw new Error(
+                `Path "${relativePath}" resolves outside the workspace (".." traversal detected). Only paths within the workspace are allowed.`
+            );
+        }
+
+        return resolved;
     }
 
     // ─── read_file ───────────────────────────────────────────────────────
@@ -630,6 +715,10 @@ export class ToolExecutor {
         startLine?: number,
         endLine?: number
     ): Promise<ToolCallResult> {
+        if (!filePath) {
+            return { success: false, output: 'read_file failed: "path" argument is required but was undefined or empty. Please provide a valid file path.' };
+        }
+
         const fullPath = this.resolvePath(filePath);
 
         // Trigger lazy re-index (non-blocking, fire-and-forget)
@@ -663,7 +752,17 @@ export class ToolExecutor {
         if (content === undefined || content === null) {
             return { success: false, output: `write_file failed for "${filePath}": "content" argument is required but was undefined. Please provide the file content.` };
         }
-        const fullPath = this.resolvePath(filePath);
+
+        let fullPath: string;
+        try {
+            fullPath = this.resolvePath(filePath);
+        } catch (pathError: any) {
+            return {
+                success: false,
+                output: `write_file failed: Could not resolve path "${filePath}". ${pathError.message} Workspace root is "${this.workspaceRoot}". Use a relative path like "src/index.ts".`,
+            };
+        }
+
         const uri = vscode.Uri.file(fullPath);
 
         // Create parent directories if needed
@@ -696,7 +795,17 @@ export class ToolExecutor {
         if (!edits || !Array.isArray(edits) || edits.length === 0) {
             return { success: false, output: `edit_file failed for "${filePath}": "edits" argument must be a non-empty array of {oldText, newText} objects.` };
         }
-        const fullPath = this.resolvePath(filePath);
+
+        let fullPath: string;
+        try {
+            fullPath = this.resolvePath(filePath);
+        } catch (pathError: any) {
+            return {
+                success: false,
+                output: `edit_file failed: Could not resolve path "${filePath}". ${pathError.message} Workspace root is "${this.workspaceRoot}". Use a relative path like "src/index.ts".`,
+            };
+        }
+
         const uri = vscode.Uri.file(fullPath);
 
         // Read current content
@@ -904,8 +1013,9 @@ export class ToolExecutor {
         dirPath: string,
         recursive: boolean
     ): Promise<ToolCallResult> {
-        const fullPath = this.resolvePath(dirPath === '.' || dirPath === '' ? '' : dirPath);
-        const uri = vscode.Uri.file(fullPath || this.workspaceRoot);
+        const isRoot = dirPath === '.' || dirPath === '';
+        const fullPath = isRoot ? this.workspaceRoot : this.resolvePath(dirPath);
+        const uri = vscode.Uri.file(fullPath);
         const result: string[] = [];
 
         await this.buildDirListing(uri, '', recursive ? 4 : 1, result);
