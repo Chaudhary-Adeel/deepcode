@@ -61,6 +61,8 @@ export interface AgentLoopOptions {
     onProgress?: (message: string) => void;
     onToolCall?: (toolName: string, args: Record<string, any>) => void;
     onToolResult?: (toolName: string, result: ToolCallResult) => void;
+    /** Called with the LLM's inline reasoning text when it precedes a tool call */
+    onLLMReason?: (reasoning: string) => void;
     checkCancelled?: () => boolean;
     /** Stream tokens for the final response in real-time */
     onToken?: (token: string) => void;
@@ -214,20 +216,14 @@ export class AgentLoop {
             if (iteration === 1) {
                 this.opts.onProgress?.('Analyzing your request...');
             } else {
-                // Give users descriptive progress instead of generic "Thinking..."
+                // Only emit progress for meaningful state changes — tool call
+                // events already provide granular visibility via onToolCall/onToolResult
                 const toolsSoFar = this.toolCallLog.length;
                 const lastTool = toolsSoFar > 0 ? this.toolCallLog[toolsSoFar - 1] : null;
-                let progressMsg: string;
                 if (lastTool && !lastTool.success) {
-                    progressMsg = `Recovering from ${lastTool.name} issue, retrying...`;
-                } else if (toolsSoFar === 0) {
-                    progressMsg = 'Analyzing your request...';
-                } else if (toolsSoFar < 3) {
-                    progressMsg = `Reviewing results (step ${iteration}, ${toolsSoFar} tool calls so far)...`;
-                } else {
-                    progressMsg = `Continuing work (step ${iteration}, ${toolsSoFar} tool calls so far)...`;
+                    this.opts.onProgress?.(`Recovering from ${lastTool.name} issue, retrying...`);
                 }
-                this.opts.onProgress?.(progressMsg);
+                // Otherwise stay silent — individual tool calls tell the story
             }
 
             let response;
@@ -261,6 +257,12 @@ export class AgentLoop {
 
             // Check if the model wants to use tools
             if (message.tool_calls && message.tool_calls.length > 0) {
+                // Surface the LLM's inline reasoning (if any) before executing tools
+                if (message.content && message.content.trim()) {
+                    const reasoning = message.content.trim().replace(/\s+/g, ' ');
+                    this.opts.onLLMReason?.(reasoning.length > 200 ? reasoning.substring(0, 200) + '…' : reasoning);
+                }
+
                 // Add the assistant message with tool_calls to history
                 this.messages.push({
                     role: 'assistant',
@@ -311,8 +313,8 @@ export class AgentLoop {
                 }
 
                 // Execute all tool calls in parallel
-                const toolCount = message.tool_calls.length;
-                this.opts.onProgress?.(this.describeToolActions(message.tool_calls));
+                // Individual onToolCall callbacks emit agentStatus steps so the
+                // activity feed shows per-file detail — no batch description needed.
 
                 const toolResults = await Promise.all(
                     message.tool_calls.map(async (tc) => {
@@ -552,6 +554,7 @@ export class AgentLoop {
                 this.opts.onProgress?.(msg),
             onToolCall: this.opts.onToolCall,
             onToolResult: this.opts.onToolResult,
+            onLLMReason: this.opts.onLLMReason,
             checkCancelled: this.opts.checkCancelled,
         });
 

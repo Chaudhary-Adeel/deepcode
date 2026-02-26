@@ -62,7 +62,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 case 'clearApiKey': {
                     await this._deepseekService.clearApiKey(this._context);
                     this._view?.webview.postMessage({ type: 'apiKeyStatus', hasKey: false });
-                    vscode.window.showInformationMessage('DeepCode: API key cleared.');
                     break;
                 }
                 case 'getSettings': {
@@ -450,6 +449,32 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     private _toolCallCounter = 0;
 
+    /** Human-readable label for a tool call — used in the activity-feed step text. */
+    private static describeToolCall(toolName: string, args: Record<string, any>): string {
+        switch (toolName) {
+            case 'read_file':        return `Reading ${args.path || 'file'}...`;
+            case 'write_file':       return `Writing ${args.path || 'file'}...`;
+            case 'edit_file':        return `Editing ${args.path || 'file'}...`;
+            case 'multi_edit_files': return `Editing ${(args.files || []).length} file(s)...`;
+            case 'list_directory':   return `Exploring ${args.path || '.'}...`;
+            case 'search_files':     return `Finding files: ${args.pattern || ''}...`;
+            case 'grep_search':      return `Searching: "${(args.query || '').substring(0, 50)}"...`;
+            case 'semantic_search':  return `Semantic search: "${(args.query || '').substring(0, 50)}"...`;
+            case 'search_symbol':    return `Looking up symbol: ${args.symbol || ''}...`;
+            case 'get_file_skeleton':return `Scanning ${args.path || 'file'}...`;
+            case 'run_command':      return `Running: ${(args.command || '').substring(0, 50)}...`;
+            case 'get_diagnostics':  return 'Checking for errors...';
+            case 'web_search':       return `Web search: "${(args.query || '').substring(0, 50)}"...`;
+            case 'fetch_webpage':    return 'Reading documentation...';
+            case 'run_subagent':     return `Sub-task: ${(args.task || '').substring(0, 60)}...`;
+            case 'intent_agent':     return 'Classifying request...';
+            case 'planner_agent':    return 'Planning approach...';
+            case 'reference_miner':  return 'Searching for reference examples...';
+            case 'verifier':         return `Verifying: ${(args.command || '').substring(0, 50)}...`;
+            default:                 return `${toolName.replace(/_/g, ' ')}...`;
+        }
+    }
+
     private async handleChatMessage(message: string, attachedFiles?: string[]) {
         const apiKey = await this._deepseekService.getApiKey(this._context);
         if (!apiKey) {
@@ -550,9 +575,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 (status) => {
                     this._view?.webview.postMessage({ type: 'agentStatus', status });
                 },
-                // onToolCall — real-time tool call visibility
+                // onToolCall — show each tool as an activity-feed step AND an expandable block
                 (toolName, args) => {
                     this._toolCallCounter++;
+                    // Activity-feed step (the step that shows filename/query detail)
+                    this._view?.webview.postMessage({
+                        type: 'agentStatus',
+                        status: SidebarProvider.describeToolCall(toolName, args),
+                    });
+                    // Expandable block (for output inspection)
                     this._view?.webview.postMessage({
                         type: 'toolCall',
                         name: toolName,
@@ -560,8 +591,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         callId: this._toolCallCounter,
                     });
                 },
-                // onToolResult — tool completion feedback
+                // onToolResult — close the activity step + update expandable block
                 (toolName, toolResult) => {
+                    this._view?.webview.postMessage({
+                        type: 'toolStepDone',
+                        success: toolResult.success,
+                        label: toolResult.success ? undefined : `${toolName} failed`,
+                    });
                     this._view?.webview.postMessage({
                         type: 'toolResult',
                         name: toolName,
@@ -576,6 +612,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 (token) => {
                     streamedTokens = true;
                     this._view?.webview.postMessage({ type: 'streamToken', token });
+                },
+                // onLLMReason — show why the agent is calling a tool
+                (reasoning) => {
+                    this._view?.webview.postMessage({ type: 'llmReasoning', text: reasoning });
                 },
             );
 
@@ -758,7 +798,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
 
         this._isCancelled = false;
-        this._view?.webview.postMessage({ type: 'editStart' });
+        // Use streamStart so the message bubble + activity feed exist for live tool call blocks
+        this._view?.webview.postMessage({ type: 'streamStart' });
 
         // Search workspace for related code to enrich edit context
         this._view?.webview.postMessage({ type: 'agentStatus', status: 'Searching workspace for related code...' });
@@ -770,7 +811,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         try {
             const cfg = this._deepseekService.getConfig();
 
-            // Use multi-agent orchestration for edits
+            // Use multi-agent orchestration for edits, with full tool call visibility
             const result = await this._subAgentService.orchestrateEdit(
                 apiKey,
                 cfg.model,
@@ -784,9 +825,70 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     this._view?.webview.postMessage({ type: 'agentStatus', status });
                 },
                 () => this._isCancelled,
+                // onToolCall — activity-feed step + expandable block
+                (toolName, args) => {
+                    this._toolCallCounter++;
+                    this._view?.webview.postMessage({
+                        type: 'agentStatus',
+                        status: SidebarProvider.describeToolCall(toolName, args),
+                    });
+                    this._view?.webview.postMessage({
+                        type: 'toolCall',
+                        name: toolName,
+                        args,
+                        callId: this._toolCallCounter,
+                    });
+                },
+                // onToolResult — close the step + update the expandable block
+                (toolName, toolResult) => {
+                    this._view?.webview.postMessage({
+                        type: 'toolStepDone',
+                        success: toolResult.success,
+                        label: toolResult.success ? undefined : `${toolName} failed`,
+                    });
+                    this._view?.webview.postMessage({
+                        type: 'toolResult',
+                        name: toolName,
+                        success: toolResult.success,
+                        output: toolResult.output,
+                        callId: this._toolCallCounter,
+                    });
+                },
+                // onLLMReason — show why the agent is calling a tool
+                (reasoning) => {
+                    this._view?.webview.postMessage({ type: 'llmReasoning', text: reasoning });
+                },
             );
 
-            const editResult = result.editResult || this._fileEditorService.parseEditResponse(result.content);
+            // Try to get a structured edit result.
+            // If parsing fails the agent completed the task autonomously via tools
+            // (e.g. write_file on new files) — treat that as success and stream the explanation.
+            let editResult: import('./fileEditorService').EditResult | null = null;
+            try {
+                editResult = result.editResult || this._fileEditorService.parseEditResponse(result.content);
+            } catch {
+                // Agent already wrote files via tools — stream the explanation then close
+                const explanation = result.content || 'Task completed.';
+                const chunkSize = 40;
+                for (let i = 0; i < explanation.length; i += chunkSize) {
+                    this._view?.webview.postMessage({ type: 'streamToken', token: explanation.substring(i, i + chunkSize) });
+                    await new Promise(r => setTimeout(r, 5));
+                }
+                this._view?.webview.postMessage({
+                    type: 'streamEnd',
+                    usage: { total_tokens: result.totalTokens, prompt_tokens: 0, completion_tokens: 0 },
+                    agentsUsed: result.agentsUsed,
+                    toolCallCount: result.agentResults?.length ?? 0,
+                    iterations: 0,
+                    subAgentCount: 0,
+                });
+                return;
+            }
+
+            if (!editResult) {
+                // Shouldn't happen — guard for safety
+                throw new Error('Could not extract edits from agent response.');
+            }
 
             // Store pending edit for approval
             this._pendingEdit = {
@@ -802,7 +904,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 return;
             }
 
-            // Otherwise, send proposal to webview for inline approval
+            // Otherwise, send proposal to webview for inline approval.
+            // editProposal finalises the tool-call bubble then shows the diff + approve buttons.
             const shortName = targetFileName.split('/').pop() || targetFileName;
             this._view?.webview.postMessage({
                 type: 'editProposal',
@@ -868,7 +971,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         await this._deepseekService.setApiKey(this._context, apiKey.trim());
         this._view?.webview.postMessage({ type: 'apiKeyStatus', hasKey: true });
-        vscode.window.showInformationMessage('DeepCode: API key saved securely.');
     }
 
     private async sendApiKeyStatus() {
@@ -1319,6 +1421,49 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         .code-block-wrapper pre {
             margin: 0;
+        }
+
+        /* Expand button for long code blocks */
+        .code-expand-btn {
+            position: absolute;
+            top: 0;
+            right: 0;
+            padding: 1px 7px;
+            font-size: 10px;
+            color: var(--vscode-descriptionForeground);
+            background: var(--vscode-editor-inactiveSelectionBackground, rgba(255,255,255,0.06));
+            border: none;
+            cursor: pointer;
+            border-bottom-left-radius: 3px;
+            display: flex;
+            align-items: center;
+            gap: 3px;
+            font-family: var(--dc-font-family);
+            user-select: none;
+            line-height: 1.6;
+            z-index: 2;
+        }
+        .code-expand-btn:hover {
+            color: var(--vscode-foreground);
+            background: var(--vscode-toolbar-hoverBackground);
+        }
+        /* When a code block has an expand button, shift the lang label away from it */
+        .code-block-wrapper.has-expand-btn .code-lang-label {
+            right: auto;
+            left: 0;
+            border-bottom-left-radius: 0;
+            border-bottom-right-radius: 3px;
+        }
+        .code-block-wrapper.collapsible pre {
+            max-height: calc(1.6em * 6);
+            overflow: hidden;
+            -webkit-mask-image: linear-gradient(to bottom, black 40%, transparent 100%);
+            mask-image: linear-gradient(to bottom, black 40%, transparent 100%);
+        }
+        .code-block-wrapper.collapsible.expanded pre {
+            max-height: none;
+            -webkit-mask-image: none;
+            mask-image: none;
         }
 
         .edit-proposal-actions {
@@ -2972,6 +3117,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             return str.replace(/&/g, '&amp;').replace(/\x3c/g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;');
         }
 
+        function toggleCodeBlock(btn) {
+            var wrapper = btn.closest('.code-block-wrapper');
+            var isExpanded = wrapper.classList.toggle('expanded');
+            btn.title = isExpanded ? 'Collapse' : 'Expand';
+            btn.innerHTML = isExpanded
+                ? '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="10" height="10"><path d="M5 2v3H2M11 2v3h3M14 11h-3v3M5 14v-3H2"/></svg>'
+                : '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="10" height="10"><path d="M2 5V2h3M11 2h3v3M14 11v3h-3M5 14H2v-3"/></svg>';
+        }
+
         function addMessage(role, content) {
             const welcome = document.getElementById('welcomeCard');
             if (welcome) welcome.remove();
@@ -2997,8 +3151,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             let s = text.replace(/&/g, '&amp;').replace(/\x3c/g, '&lt;').replace(/>/g, '&gt;');
             // Code blocks (fenced) — with syntax highlighting
             s = s.replace(/\`\`\`(\\w*)?\\n?([\\s\\S]*?)\`\`\`/g, function(m, lang, code) {
+                const trimmed = code.trim();
+                const lineCount = (trimmed.match(/\n/g) || []).length + 1;
+                const isLong = lineCount > 5;
                 const langLabel = lang ? '<span class="code-lang-label">' + lang + '</span>' : '';
-                const highlighted = highlightCode(code.trim(), lang || '');
+                const highlighted = highlightCode(trimmed, lang || '');
+                if (isLong) {
+                    const expandBtn = '<button class="code-expand-btn" onclick="toggleCodeBlock(this)" title="Expand">'  
+                        + '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="10" height="10"><path d="M2 5V2h3M11 2h3v3M14 11v3h-3M5 14H2v-3"/></svg>'
+                        + '</button>';
+                    return '<div class="code-block-wrapper collapsible has-expand-btn">' + langLabel + expandBtn + '<pre><code>' + highlighted + '</code></pre></div>';
+                }
                 return '<div class="code-block-wrapper">' + langLabel + '<pre><code>' + highlighted + '</code></pre></div>';
             });
             // Inline code
@@ -3515,15 +3678,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             }
                         }
                         currentStreamRaw += data.token;
-                        // Preserve activity feed / summary + tool calls when reformatting
+                        // Preserve activity feed / summary when reformatting markdown
                         var preservedEls = [];
                         if (currentStreamEl) {
                             var afEl = currentStreamEl.querySelector('.activity-feed');
                             var sumEl = currentStreamEl.querySelector('.activity-feed-summary');
-                            var tcEl = currentStreamEl.querySelector('.tool-calls-container');
                             if (afEl) preservedEls.push(afEl);
                             if (sumEl) preservedEls.push(sumEl);
-                            if (tcEl) preservedEls.push(tcEl);
                         }
                         currentStreamEl.innerHTML = formatContent(currentStreamRaw);
                         for (var pi = preservedEls.length - 1; pi >= 0; pi--) {
@@ -3630,6 +3791,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     document.getElementById('sendBtn').disabled = false;
                     document.getElementById('stopBtn').classList.add('hidden');
                     hideProcessBar();
+                    // Clean up any tool-call bubble left from streamStart (auto-approve path)
+                    if (currentStreamEl) {
+                        var typingEc = document.getElementById('typingIndicator');
+                        if (typingEc) typingEc.remove();
+                        var afEc = document.getElementById('activityFeed');
+                        if (afEc) afEc.removeAttribute('id');
+                        if (!currentStreamRaw) { currentStreamEl.remove(); }
+                        currentStreamEl = null;
+                        currentStreamRaw = '';
+                    }
                     if (data.success) {
                         let msg = data.explanation;
                         if (data.agentsUsed) {
@@ -3694,6 +3865,50 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     document.getElementById('sendBtn').disabled = false;
                     document.getElementById('stopBtn').classList.add('hidden');
                     hideProcessBar();
+
+                    // Finalise the tool-call message bubble created by streamStart:
+                    // collapse the activity feed so users can expand it, then keep
+                    // the tool-call blocks as a collapsible work-log above the diff.
+                    if (currentStreamEl) {
+                        var typingEditInd = document.getElementById('typingIndicator');
+                        if (typingEditInd) typingEditInd.remove();
+                        var slEditInd = document.getElementById('agentStatusLine');
+                        if (slEditInd) slEditInd.remove();
+                        var afEditFeed = document.getElementById('activityFeed');
+                        if (afEditFeed) {
+                            var lastEditStep = afEditFeed.querySelector('.activity-step.current');
+                            if (lastEditStep) {
+                                lastEditStep.classList.remove('current');
+                                var lsEditIcon = lastEditStep.querySelector('.step-icon');
+                                if (lsEditIcon) {
+                                    lsEditIcon.classList.remove('spinning');
+                                    lsEditIcon.classList.add('done');
+                                    lsEditIcon.innerHTML = '<svg viewBox="0 0 16 16"><polyline points="3.5 8.5 6.5 11.5 12.5 5.5"/></svg>';
+                                }
+                            }
+                            var editStepCount = afEditFeed.querySelectorAll('.activity-step').length;
+                            if (editStepCount > 0) {
+                                afEditFeed.classList.add('collapsed');
+                                var editElapsed = processStartTime ? Math.floor((Date.now() - processStartTime) / 1000) : 0;
+                                var editSummaryDiv = document.createElement('div');
+                                editSummaryDiv.className = 'activity-feed-summary';
+                                editSummaryDiv.innerHTML = '<svg viewBox="0 0 16 16"><polyline points="6 4 10 8 6 12"/></svg>'
+                                    + '<span>' + editStepCount + ' step' + (editStepCount !== 1 ? 's' : '') + ' completed'
+                                    + (editElapsed > 0 ? ' in ' + (editElapsed >= 60 ? Math.floor(editElapsed/60) + 'm ' : '') + (editElapsed % 60) + 's' : '')
+                                    + '</span>';
+                                editSummaryDiv.addEventListener('click', function() {
+                                    this.classList.toggle('expanded-summary');
+                                    afEditFeed.classList.toggle('collapsed');
+                                });
+                                currentStreamEl.insertBefore(editSummaryDiv, currentStreamEl.firstChild);
+                            } else {
+                                afEditFeed.remove();
+                            }
+                            afEditFeed.removeAttribute('id');
+                        }
+                        currentStreamEl = null;
+                        currentStreamRaw = '';
+                    }
 
                     const welcome = document.getElementById('welcomeCard');
                     if (welcome) welcome.remove();
@@ -3865,67 +4080,75 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     renderChatList(data.chats || []);
                     break;
                 }
-                case 'toolCall': {
-                    // A tool was called during the agent loop
-                    if (currentStreamEl) {
-                        let container = currentStreamEl.querySelector('.tool-calls-container');
-                        if (!container) {
-                            container = document.createElement('div');
-                            container.className = 'tool-calls-container';
-                            currentStreamEl.appendChild(container);
+                case 'toolStepDone': {
+                    // Close the current spinning activity step immediately.
+                    // For failures, colour it red instead of green.
+                    var afTsd = document.getElementById('activityFeed');
+                    if (afTsd) {
+                        var tsdStep = afTsd.querySelector('.activity-step.current');
+                        if (tsdStep) {
+                            tsdStep.classList.remove('current');
+                            var tsdIcon = tsdStep.querySelector('.step-icon');
+                            if (tsdIcon) {
+                                tsdIcon.classList.remove('spinning');
+                                if (data.success === false) {
+                                    tsdIcon.classList.add('fail');
+                                    tsdIcon.style.color = 'var(--vscode-testing-iconFailed, #f14c4c)';
+                                    tsdIcon.innerHTML = '<svg viewBox="0 0 16 16"><line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg>';
+                                    var tsdText = tsdStep.querySelector('.step-text');
+                                    if (tsdText && data.label) { tsdText.textContent = data.label; }
+                                } else {
+                                    tsdIcon.classList.add('done');
+                                    tsdIcon.innerHTML = '<svg viewBox="0 0 16 16"><polyline points="3.5 8.5 6.5 11.5 12.5 5.5"/></svg>';
+                                }
+                            }
+                            var tsdTime = tsdStep.querySelector('.step-time');
+                            if (tsdTime && processStartTime) {
+                                var tsdNow = Math.floor((Date.now() - processStartTime) / 1000);
+                                tsdTime.textContent = (tsdNow >= 60 ? Math.floor(tsdNow/60) + 'm ' : '') + (tsdNow % 60) + 's';
+                            }
                         }
-
-                        const block = document.createElement('div');
-                        block.className = 'tool-call-block';
-                        block.id = 'tc-' + (data.callId || Date.now());
-                        block.dataset.toolName = data.name;
-
-                        const summary = data.args && data.args.path ? data.args.path
-                            : data.args && data.args.query ? data.args.query
-                            : data.args && data.args.pattern ? data.args.pattern
-                            : data.args && data.args.command ? data.args.command.substring(0, 60)
-                            : data.args && data.args.task ? data.args.task.substring(0, 60)
-                            : '';
-
-                        var spinnerSvg = '<svg viewBox="0 0 16 16"><path d="M8 1.5A6.5 6.5 0 1 0 14.5 8" stroke-width="1.5"/></svg>';
-                        var chevronSvg = '<svg viewBox="0 0 16 16"><polyline points="6 4 10 8 6 12"/></svg>';
-
-                        block.innerHTML = ''
-                            + '<div class="tool-call-header">'
-                            +   '<span class="tool-call-icon spinning">' + spinnerSvg + '</span>'
-                            +   '<span class="tool-call-name">' + escapeHtml(data.name) + '</span>'
-                            +   '<span class="tool-call-summary">' + escapeHtml(summary) + '</span>'
-                            +   '<span class="tool-call-chevron">' + chevronSvg + '</span>'
-                            + '</div>'
-                            + '<div class="tool-call-details">Running...</div>';
-
-                        block.querySelector('.tool-call-header').addEventListener('click', function() {
-                            this.parentElement.classList.toggle('expanded');
-                        });
-
-                        container.appendChild(block);
-                        const messages = document.getElementById('chatMessages');
-                        messages.scrollTop = messages.scrollHeight;
                     }
                     break;
                 }
+                case 'toolCall': {
+                    // Tool call blocks removed — activity-feed steps carry the detail now.
+                    break;
+                }
                 case 'toolResult': {
-                    const block = document.getElementById('tc-' + data.callId);
-                    if (block) {
-                        const icon = block.querySelector('.tool-call-icon');
-                        icon.classList.remove('spinning');
-                        if (data.success) {
-                            icon.innerHTML = getToolSvg(block.dataset.toolName || data.name);
-                            icon.className = 'tool-call-icon tool-call-status-success';
-                        } else {
-                            icon.innerHTML = '<svg viewBox="0 0 16 16"><line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg>';
-                            icon.className = 'tool-call-icon tool-call-status-fail';
+                    // No-op: toolStepDone handles step completion.
+                    break;
+                }
+                case 'llmReasoning': {
+                    // Show LLM reasoning (why a tool is being called) as a distinct activity step
+                    var afLlm = document.getElementById('activityFeed');
+                    if (afLlm && !afLlm.classList.contains('collapsed')) {
+                        // Complete the previous spinning step
+                        var prevLlmStep = afLlm.querySelector('.activity-step.current');
+                        if (prevLlmStep) {
+                            prevLlmStep.classList.remove('current');
+                            var prevLlmIcon = prevLlmStep.querySelector('.step-icon');
+                            if (prevLlmIcon) {
+                                prevLlmIcon.classList.remove('spinning');
+                                prevLlmIcon.classList.add('done');
+                                prevLlmIcon.innerHTML = '<svg viewBox="0 0 16 16"><polyline points="3.5 8.5 6.5 11.5 12.5 5.5"/></svg>';
+                            }
+                            var prevLlmTime = prevLlmStep.querySelector('.step-time');
+                            if (prevLlmTime && processStartTime) {
+                                var llmNow = Math.floor((Date.now() - processStartTime) / 1000);
+                                prevLlmTime.textContent = (llmNow >= 60 ? Math.floor(llmNow/60) + 'm ' : '') + (llmNow % 60) + 's';
+                            }
                         }
-                        const details = block.querySelector('.tool-call-details');
-                        if (details) {
-                            const output = (data.output || '').substring(0, 2000);
-                            details.textContent = output + (data.output && data.output.length > 2000 ? '\\n... (truncated)' : '');
-                        }
+                        // Add reasoning step with a thought-bubble icon and italic styling
+                        var llmStep = document.createElement('div');
+                        llmStep.className = 'activity-step current reasoning';
+                        llmStep.innerHTML = ''
+                            + '<span class="step-icon"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M8 2.5c-3 0-5 1.8-5 4 0 1.2.6 2.3 1.6 3l-.4 2 2-1c.5.2 1.1.3 1.8.3 3 0 5-1.8 5-4s-2-4.3-5-4.3z"/></svg></span>'
+                            + '<span class="step-text" style="font-style:italic;opacity:0.8">' + escapeHtml(data.text) + '</span>'
+                            + '<span class="step-time"></span>';
+                        afLlm.appendChild(llmStep);
+                        var msgsLlm = document.getElementById('chatMessages');
+                        msgsLlm.scrollTop = msgsLlm.scrollHeight;
                     }
                     break;
                 }
