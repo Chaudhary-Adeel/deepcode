@@ -3,8 +3,12 @@
  *
  * Centralises workspace context gathering for the agent loop.
  * Provides helpers for building workspace summaries, reading files,
- * assembling user prompts, and compressing context to fit within
- * token budgets.
+ * assembling user prompts, compressing context, and enforcing token budgets.
+ *
+ * Includes:
+ *   - ContextBudget: Token-aware budget allocator (Module 10)
+ *   - Rolling summary: Summarizes older turns (Module 8)
+ *   - OperationEntry log: Structured operation history (Module 8)
  */
 
 import * as vscode from 'vscode';
@@ -341,5 +345,292 @@ export class ContextManager {
     private isBinaryFile(filePath: string): boolean {
         const ext = filePath.split('.').pop()?.toLowerCase() || '';
         return BINARY_EXTS.has(ext);
+    }
+}
+
+// ─── Module 8: Operation History ─────────────────────────────────────────────
+
+/** Structured log entry for what each agent did */
+export interface OperationEntry {
+    timestamp: number;
+    agentType: 'intent' | 'planner' | 'generator' | 'verifier' | 'reference-miner' | 'orchestrator';
+    action: string;
+    target: string;
+    result: 'success' | 'failure' | 'partial';
+    notes: string;
+}
+
+// ─── Module 8: Rolling Context Summary ───────────────────────────────────────
+
+/**
+ * Manages rolling summaries of conversation history.
+ * Keeps the last N turns verbatim; summarizes older turns into a compact digest.
+ */
+export class RollingContext {
+    private summaries: string[] = [];
+    private rawTurns: Array<{ role: string; content: string }> = [];
+    private operationLog: OperationEntry[] = [];
+
+    /** Number of recent turns to keep verbatim */
+    private readonly keepVerbatim: number;
+    /** Max chars for the summary section */
+    private readonly maxSummaryChars: number;
+
+    constructor(keepVerbatim = 4, maxSummaryChars = 2000) {
+        this.keepVerbatim = keepVerbatim;
+        this.maxSummaryChars = maxSummaryChars;
+    }
+
+    /** Add a conversation turn */
+    addTurn(role: string, content: string): void {
+        this.rawTurns.push({ role, content });
+    }
+
+    /** Add an operation log entry */
+    addOperation(entry: OperationEntry): void {
+        this.operationLog.push(entry);
+        // Keep last 50 operations
+        if (this.operationLog.length > 50) {
+            this.operationLog = this.operationLog.slice(-50);
+        }
+    }
+
+    /** Get recent operations (for detecting repeated failures) */
+    getRecentOperations(count = 10): OperationEntry[] {
+        return this.operationLog.slice(-count);
+    }
+
+    /** Check if the same action has failed repeatedly */
+    hasRepeatedFailure(action: string, threshold = 3): boolean {
+        const recent = this.operationLog.slice(-10);
+        const failures = recent.filter(
+            op => op.action === action && op.result === 'failure'
+        );
+        return failures.length >= threshold;
+    }
+
+    /**
+     * Build the context string for injection into prompts.
+     * Returns: summary of old turns + verbatim recent turns.
+     */
+    buildContext(): string {
+        const parts: string[] = [];
+
+        // Summarized older turns
+        if (this.summaries.length > 0) {
+            parts.push('## Conversation Summary');
+            parts.push(this.summaries.join('\n'));
+        }
+
+        // Verbatim recent turns
+        const recent = this.rawTurns.slice(-this.keepVerbatim);
+        if (recent.length > 0) {
+            parts.push('## Recent Conversation');
+            for (const turn of recent) {
+                parts.push(`[${turn.role}]: ${turn.content.substring(0, 1000)}`);
+            }
+        }
+
+        return parts.join('\n\n');
+    }
+
+    /**
+     * Summarize older turns to free up context space.
+     * Call this periodically (e.g., every 4 messages).
+     * Pass a summarize function that calls DeepSeek with a mini-prompt.
+     */
+    async maybeSummarize(
+        summarizeFn: (text: string) => Promise<string>
+    ): Promise<void> {
+        if (this.rawTurns.length <= this.keepVerbatim) {
+            return; // Not enough turns to summarize
+        }
+
+        // Take the oldest turns beyond what we keep verbatim
+        const toSummarize = this.rawTurns.slice(0, -this.keepVerbatim);
+        if (toSummarize.length === 0) { return; }
+
+        const text = toSummarize
+            .map(t => `[${t.role}]: ${t.content.substring(0, 500)}`)
+            .join('\n');
+
+        try {
+            const summary = await summarizeFn(text);
+            this.summaries.push(summary);
+
+            // Trim summaries to budget
+            let totalChars = this.summaries.join('\n').length;
+            while (totalChars > this.maxSummaryChars && this.summaries.length > 1) {
+                this.summaries.shift();
+                totalChars = this.summaries.join('\n').length;
+            }
+
+            // Remove summarized turns from raw
+            this.rawTurns = this.rawTurns.slice(-this.keepVerbatim);
+        } catch {
+            // Summarization failed — keep raw turns
+        }
+    }
+
+    /** Get total turn count (for deciding when to summarize) */
+    getTurnCount(): number {
+        return this.rawTurns.length;
+    }
+}
+
+// ─── Module 10: Context Budget Manager ───────────────────────────────────────
+
+export interface BudgetComponents {
+    systemPrompt: string;
+    summary: string;
+    skeletons: string;
+    toolResults: string;
+    history: Array<{ role: string; content: string }>;
+}
+
+export interface BudgetResult {
+    systemPrompt: string;
+    summary: string;
+    skeletons: string;
+    toolResults: string;
+    history: Array<{ role: string; content: string }>;
+    totalTokens: number;
+    dropped: string[];
+}
+
+/**
+ * Token-aware context budget allocator.
+ * Ensures the total context fits within the model's window.
+ *
+ * Budget allocation (for 26k usable tokens):
+ *   - System prompt: ~500 tokens (never dropped)
+ *   - Summary: ~1k tokens
+ *   - Skeletons: ~3k tokens
+ *   - Tool results: ~8k tokens
+ *   - History: ~6k tokens (last 3 turns never dropped)
+ *   - Output: ~8k tokens (reserved, not in input)
+ *
+ * Drop order when over budget:
+ *   1. Skeletons (lowest priority)
+ *   2. Oldest tool results
+ *   3. Compress summary
+ *   4. NEVER drop system prompt or last 3 history turns
+ */
+export class ContextBudget {
+    /** Max tokens for the entire input context */
+    private readonly maxTokens: number;
+    /** Approximate chars per token (conservative) */
+    private readonly charsPerToken = 4;
+    /** Number of recent history turns that are never dropped */
+    private readonly protectedHistoryTurns = 3;
+
+    constructor(maxTokens = 26000) {
+        this.maxTokens = maxTokens;
+    }
+
+    /** Estimate token count from a string */
+    estimateTokens(text: string): number {
+        return Math.ceil(text.length / this.charsPerToken);
+    }
+
+    /**
+     * Trim components to fit within the token budget.
+     * Returns ready-to-use components with a report of what was dropped.
+     */
+    fit(components: BudgetComponents): BudgetResult {
+        const dropped: string[] = [];
+        let { systemPrompt, summary, skeletons, toolResults } = components;
+        let history = [...components.history];
+
+        const measure = () =>
+            this.estimateTokens(systemPrompt) +
+            this.estimateTokens(summary) +
+            this.estimateTokens(skeletons) +
+            this.estimateTokens(toolResults) +
+            history.reduce((acc, h) => acc + this.estimateTokens(h.content), 0);
+
+        let total = measure();
+
+        // Step 1: Drop skeletons
+        if (total > this.maxTokens && skeletons.length > 0) {
+            const saved = this.estimateTokens(skeletons);
+            skeletons = '';
+            dropped.push(`skeletons (~${saved} tokens)`);
+            total = measure();
+        }
+
+        // Step 2: Truncate oldest tool results
+        if (total > this.maxTokens && toolResults.length > 0) {
+            const targetChars = Math.max(0,
+                toolResults.length - (total - this.maxTokens) * this.charsPerToken
+            );
+            if (targetChars <= 0) {
+                dropped.push(`all tool results (~${this.estimateTokens(toolResults)} tokens)`);
+                toolResults = '';
+            } else {
+                const originalTokens = this.estimateTokens(toolResults);
+                toolResults = toolResults.substring(toolResults.length - targetChars);
+                // Find a clean line break
+                const lineBreak = toolResults.indexOf('\n');
+                if (lineBreak > 0 && lineBreak < 200) {
+                    toolResults = toolResults.substring(lineBreak + 1);
+                }
+                const keptTokens = this.estimateTokens(toolResults);
+                dropped.push(`older tool results (~${originalTokens - keptTokens} tokens)`);
+            }
+            total = measure();
+        }
+
+        // Step 3: Compress summary
+        if (total > this.maxTokens && summary.length > 0) {
+            const targetChars = Math.max(200,
+                summary.length - (total - this.maxTokens) * this.charsPerToken
+            );
+            if (targetChars < summary.length) {
+                const saved = this.estimateTokens(summary) - this.estimateTokens(summary.substring(0, targetChars));
+                summary = summary.substring(0, targetChars) + '...';
+                dropped.push(`summary truncated (~${saved} tokens)`);
+                total = measure();
+            }
+        }
+
+        // Step 4: Trim older history (protect last N turns)
+        if (total > this.maxTokens && history.length > this.protectedHistoryTurns) {
+            const removable = history.slice(0, -this.protectedHistoryTurns);
+            let tokensToFree = total - this.maxTokens;
+            let removed = 0;
+
+            while (removable.length > 0 && tokensToFree > 0) {
+                const turn = removable.shift()!;
+                const turnTokens = this.estimateTokens(turn.content);
+                tokensToFree -= turnTokens;
+                removed++;
+            }
+
+            history = history.slice(removed);
+            dropped.push(`${removed} older history turn(s)`);
+            total = measure();
+        }
+
+        return {
+            systemPrompt,
+            summary,
+            skeletons,
+            toolResults,
+            history,
+            totalTokens: measure(),
+            dropped,
+        };
+    }
+
+    /** Check if components fit without modification */
+    fits(components: BudgetComponents): boolean {
+        const total =
+            this.estimateTokens(components.systemPrompt) +
+            this.estimateTokens(components.summary) +
+            this.estimateTokens(components.skeletons) +
+            this.estimateTokens(components.toolResults) +
+            components.history.reduce((acc, h) => acc + this.estimateTokens(h.content), 0);
+        return total <= this.maxTokens;
     }
 }

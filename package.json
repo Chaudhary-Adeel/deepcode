@@ -73,6 +73,14 @@
       {
         "command": "deepcode.openSettings",
         "title": "DeepCode: Open Settings"
+      },
+      {
+        "command": "deepcode.rebuildIndex",
+        "title": "DeepCode: Rebuild Symbol Index"
+      },
+      {
+        "command": "deepcode.fixCode",
+        "title": "DeepCode: Fix Selected Code with AI"
       }
     ],
     "menus": {
@@ -90,6 +98,11 @@
         {
           "command": "deepcode.refactorCode",
           "group": "deepcode@3",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "deepcode.fixCode",
+          "group": "deepcode@4",
           "when": "editorHasSelection"
         }
       ]
@@ -161,6 +174,11 @@
           "type": "boolean",
           "default": false,
           "description": "Automatically save files after AI edits are applied."
+        },
+        "deepcode.verifyCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Command to verify code after edits (e.g., 'npx tsc --noEmit'). Auto-detects from package.json if empty."
         }
       }
     },
@@ -177,12 +195,24 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "lint": "eslint src --ext ts"
+    "lint": "eslint src",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage"
   },
   "devDependencies": {
+    "@types/jest": "^30.0.0",
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
-    "typescript": "^5.3.3"
+    "@typescript-eslint/eslint-plugin": "^8.56.1",
+    "@typescript-eslint/parser": "^8.56.1",
+    "eslint": "^10.0.2",
+    "jest": "^30.2.0",
+    "ts-jest": "^29.4.6",
+    "typescript": "^5.3.3",
+    "typescript-eslint": "^8.56.1"
   },
-  "dependencies": {}
+  "dependencies": {
+    "web-tree-sitter": "^0.26.6"
+  }
 }
