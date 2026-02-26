@@ -41,6 +41,13 @@ export interface ToolDefinition {
 export interface ToolCallResult {
     success: boolean;
     output: string;
+    /** Files written/edited during this tool call, with diff stats for the UI */
+    changedFiles?: Array<{
+        relPath: string;
+        originalContent: string;
+        added: number;
+        removed: number;
+    }>;
 }
 
 // ─── Tool Definitions ────────────────────────────────────────────────────────
@@ -745,6 +752,18 @@ export class ToolExecutor {
 
     // ─── write_file ──────────────────────────────────────────────────────
 
+    /** Compute simple line-level diff stats between two file contents. */
+    private static diffStats(oldContent: string, newContent: string): { added: number; removed: number } {
+        const oldLines = oldContent.split('\n');
+        const newLines = newContent.split('\n');
+        const oldSet = new Set(oldLines);
+        const newSet = new Set(newLines);
+        return {
+            added: newLines.filter(l => !oldSet.has(l)).length,
+            removed: oldLines.filter(l => !newSet.has(l)).length,
+        };
+    }
+
     private async writeFile(filePath: string, content: string): Promise<ToolCallResult> {
         if (!filePath) {
             return { success: false, output: 'write_file failed: "path" argument is required but was undefined or empty. Please provide a valid file path.' };
@@ -765,6 +784,13 @@ export class ToolExecutor {
 
         const uri = vscode.Uri.file(fullPath);
 
+        // Capture original content for diff + undo
+        let originalContent = '';
+        try {
+            const origBytes = await vscode.workspace.fs.readFile(uri);
+            originalContent = Buffer.from(origBytes).toString('utf-8');
+        } catch { /* file doesn't exist yet */ }
+
         // Create parent directories if needed
         const dirPath = path.dirname(fullPath);
         const dirUri = vscode.Uri.file(dirPath);
@@ -777,9 +803,11 @@ export class ToolExecutor {
         await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf-8'));
 
         const lineCount = content.split('\n').length;
+        const { added, removed } = ToolExecutor.diffStats(originalContent, content);
         return {
             success: true,
             output: `File created/written: ${filePath} (${lineCount} lines)`,
+            changedFiles: [{ relPath: filePath, originalContent, added, removed }],
         };
     }
 
@@ -816,6 +844,7 @@ export class ToolExecutor {
             return { success: false, output: `edit_file failed: could not read "${filePath}": ${readErr.message}. Does the file exist?` };
         }
         let content = Buffer.from(contentBytes).toString('utf-8');
+        const originalContent = content; // capture before any mutations
 
         let appliedCount = 0;
         const failures: string[] = [];
@@ -864,7 +893,12 @@ export class ToolExecutor {
             }
         }
 
-        return { success: appliedCount > 0, output };
+        const { added, removed } = ToolExecutor.diffStats(originalContent, content);
+        return {
+            success: appliedCount > 0,
+            output,
+            changedFiles: appliedCount > 0 ? [{ relPath: filePath, originalContent, added, removed }] : undefined,
+        };
     }
 
     // ─── multi_edit_files ────────────────────────────────────────────────
@@ -883,6 +917,7 @@ export class ToolExecutor {
         let totalApplied = 0;
         let totalFailed = 0;
         const editedPaths: string[] = [];
+        const allChangedFiles: ToolCallResult['changedFiles'] = [];
 
         for (const file of files) {
             if (!file.path) {
@@ -903,6 +938,10 @@ export class ToolExecutor {
                 totalFailed += editResult.failed;
                 if (editResult.applied > 0) {
                     editedPaths.push(file.path);
+                    if (editResult.originalContent !== undefined) {
+                        const { added, removed } = ToolExecutor.diffStats(editResult.originalContent, editResult.newContent || '');
+                        allChangedFiles!.push({ relPath: file.path, originalContent: editResult.originalContent, added, removed });
+                    }
                 }
             } catch (err: any) {
                 results.push(`${file.path}: ERROR — ${err.message}`);
@@ -928,7 +967,7 @@ export class ToolExecutor {
             }
         }
 
-        return { success: totalApplied > 0, output };
+        return { success: totalApplied > 0, output, changedFiles: allChangedFiles!.length > 0 ? allChangedFiles : undefined };
     }
 
     /**
@@ -937,7 +976,7 @@ export class ToolExecutor {
     private async editFileSingle(
         filePath: string,
         edits: Array<{ oldText: string; newText: string }>
-    ): Promise<{ applied: number; failed: number; summary: string }> {
+    ): Promise<{ applied: number; failed: number; summary: string; originalContent: string; newContent: string }> {
         const fullPath = this.resolvePath(filePath);
         const uri = vscode.Uri.file(fullPath);
 
@@ -948,6 +987,7 @@ export class ToolExecutor {
             throw new Error(`could not read file: ${readErr.message}`);
         }
         let content = Buffer.from(contentBytes).toString('utf-8');
+        const originalContent = content;
 
         let applied = 0;
         const failures: string[] = [];
@@ -980,7 +1020,7 @@ export class ToolExecutor {
             summary += ` | not found: ${failures.map(f => `"${f}"`).join(', ')}`;
         }
 
-        return { applied, failed: failures.length, summary };
+        return { applied, failed: failures.length, summary, originalContent: originalContent, newContent: applied > 0 ? content : originalContent };
     }
 
     /**

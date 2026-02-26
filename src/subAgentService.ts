@@ -165,6 +165,7 @@ export class SubAgentService {
         onToolCall?: (toolName: string, args: Record<string, any>) => void,
         onToolResult?: (toolName: string, result: ToolCallResult) => void,
         onLLMReason?: (reasoning: string) => void,
+        onFileChanged?: (file: { relPath: string; originalContent: string; added: number; removed: number }) => void,
     ): Promise<OrchestratedResponse> {
         onStatus?.('Building workspace context...');
         if (checkCancelled?.()) { throw new Error('Cancelled'); }
@@ -202,6 +203,7 @@ export class SubAgentService {
             onToolCall,
             onToolResult,
             onLLMReason,
+            onFileChanged,
             checkCancelled,
         });
 
@@ -290,6 +292,7 @@ export class SubAgentService {
         checkCancelled?: () => boolean,
         onToken?: (token: string) => void,
         onLLMReason?: (reasoning: string) => void,
+        onFileChanged?: (file: { relPath: string; originalContent: string; added: number; removed: number }) => void,
     ): Promise<AgentLoopResult> {
         const toolExecutor = new ToolExecutor();
         const contextManager = new ContextManager();
@@ -561,6 +564,7 @@ export class SubAgentService {
             onToolResult,
             onToken,
             onLLMReason,
+            onFileChanged,
             checkCancelled,
         });
 

@@ -1,0 +1,282 @@
+Script started on Fri Feb 27 00:54:22 2026
+[0m[49m[39m[27m[24m[K
+[1A7[0m[49m[39m]133;A[0m[49m[37m[0m[37m[47m[38;5;232m [0m[38;5;232m[47m[47m[38;5;232m [0m[38;5;232m[47m[40m[37m[0m[37m[40m[40m[33m adeel[0m[33m[40m[40m[33m [0m[33m[40m[44m[30m[0m[30m[44m[44m[38;5;254m [1m[38;5;254m[44m[38;5;255m~[0m[38;5;255m[44m[44m[38;5;254m/[38;5;250mDe[0m[38;5;250m[44m[44m[38;5;254m/[1m[38;5;254m[44m[38;5;255mDeepCode[0m[38;5;255m[44m[44m[38;5;254m[0m[38;5;254m[44m[44m[38;5;254m [0m[38;5;254m[44m[49m[34m[0m[34m[49m[39m [0m[49m[39m]133;B[?2004h[?25l8[0m[49m[39m[27m[24m[J]2;adeel@b0x:~/Desktop/DeepCode]1;..ktop/DeepCode]7;file://b0x.local/Users/adeel/Desktop/DeepCode\[0m[38;5;254m[49m[39m[27m[24m[1m[7m%[27m[1m[0m                                                                          [0m[49m[39m[27m[24m[K[0m[27m[24m[J[0m[49m[39m[0m[49m[37m[0m[37m[47m[38;5;232m [0m[38;5;232m[47m[47m[38;5;232m [0m[38;5;232m[47m[40m[37m[0m[37m[40m[40m[33m adeel[0m[33m[40m[40m[33m [0m[33m[40m[44m[30m[0m[30m[44m[44m[38;5;254m [1m[38;5;254m[44m[38;5;255m~[0m[38;5;255m[44m[44m[38;5;254m/[38;5;250mDe[0m[38;5;250m[44m[44m[38;5;254m/[1m[38;5;254m[44m[38;5;255mDeepCode[0m[38;5;255m[44m[44m[38;5;254m[0m[38;5;254m[44m[44m[38;5;254m [0m[38;5;254m[44m[43m[34m[0m[34m[43m[43m[30m on [30mmain [30m!4 [30m?1[0m[30m[43m[43m[30m [0m[30m[43m[49m[33m[0m[33m[49m[39m [0m[49m[39m[K[6C[0m[49m[30m[0m[30m[40m[32m [0m[32m[40m[40m[32m✔[0m[32m[40m[40m[32m [0m[32m[40m[40m[32m[37m[0m[37m[40m[47m[30m at 12:54:22 AM[0m[30m[47m[47m[30m[0m[30m[47m[47m[30m [49m[37m[0m[37m[47m[30m[0m[30m[47m[49m[39m[28D[?1h=[?25h[?2004h  node[K[1C-e "const fs=require('f [Kss');const src=fs.readFileSync('/Users/adeel/Desktop/DeepCode/src/sidebarPro [Kvvider.ts','utf8');const si=src.indexOf('<!DOCTYPE html>');const html=src.sl [Kiice(si);const lines=html.split('\n');for(let i=1080;i<=1092;i++){process.st [Kddout.write((i+1)+'|'+lines[i]+'\n');}"[?1l>[?25l[?2004l[4A[0m[27m[24m[J[0m[49m[27m[24m[38;5;76m❯[0m[38;5;76m[49m[39m[27m[24m  node -e "const fs=require('fs');const src=fs.readFileSync('/Users/adeel/Desktop/DeepCode/src/sidebarProvider.ts','utf8');const si=src.indexOf('<!DOCTYPE html>');const html=src.slice(si);const lines=html.split('\n');for(let i=1080;i<=1092;i++){process.stdout.write((i+1)+'|'+lines[i]+'\n');}"[K[?25h
+zsh: event not found: DOCTYPE
+[1m[7m%[27m[1m[0m                                                                           ]2;adeel@b0x:~/Desktop/DeepCode]1;..ktop/DeepCode]7;file://b0x.local/Users/adeel/Desktop/DeepCode\[0m[27m[24m[J[0m[49m[39m
+[0m[49m[37m[0m[37m[47m[38;5;232m [0m[38;5;232m[47m[47m[38;5;232m [0m[38;5;232m[47m[40m[37m[0m[37m[40m[40m[33m adeel[0m[33m[40m[40m[33m [0m[33m[40m[44m[30m[0m[30m[44m[44m[38;5;254m [1m[38;5;254m[44m[38;5;255m~[0m[38;5;255m[44m[44m[38;5;254m/[38;5;250mDe[0m[38;5;250m[44m[44m[38;5;254m/[1m[38;5;254m[44m[38;5;255mDeepCode[0m[38;5;255m[44m[44m[38;5;254m[0m[38;5;254m[44m[44m[38;5;254m [0m[38;5;254m[44m[43m[34m[0m[34m[43m[43m[30m on [30mmain [30m!4 [30m?1[0m[30m[43m[43m[30m [0m[30m[43m[49m[33m[0m[33m[49m[39m [0m[49m[39m[K[4C[0m[49m[31m[0m[31m[41m[33m 1[0m[33m[41m[41m[33m ✘[0m[33m[41m[41m[33m [0m[33m[41m[41m[33m[37m[0m[37m[41m[47m[30m at 12:54:37 AM[0m[30m[47m[47m[30m[0m[30m[47m[47m[30m [49m[37m[0m[37m[47m[30m[0m[30m[47m[49m[39m[28D[?1h=[?2004h  pyt[Khon3 -c "[?1l>[?25l[?2004l[A[0m[27m[24m[J[0m[49m[27m[24m[38;5;196m❯[0m[38;5;196m[49m[39m[27m[24m  python3 -c "[K[?25h
+[0m[27m[24m[Jdquote> [K[?1h=[?2004hssrc = open('/Users/adeel/Desktop/DeepCode/src/sidebarProvider.ts'). [Krread()[?1l>[?2004l
+[0m[27m[24m[Jdquote> [K[?1h=[?2004hssi = src.find('DOCTYPE html')[?1l>[?2004l
+[0m[27m[24m[Jdquote> [K[?1h=[?2004hhhtml = src[si:][?1l>[?2004l
+[0m[27m[24m[Jdquote> [K[?1h=[?2004hllines = html.split('\n')[?1l>[?2004l
+[0m[27m[24m[Jdquote> [K[?1h=[?2004hffor i in range(1080, 1093):[?1l>[?2004l
+[0m[27m[24m[Jdquote> [K[?1h=[?2004h     print(i+1, '|', lines[i][:120])[?1l>[?2004l
+[0m[27m[24m[Jdquote> [K[?1h=[?2004h"[?1l>[?2004l
+]2;python3 -c ]1;python31081 |             font-family: var(--dc-editor-font);
+1082 |             font-size: var(--dc-editor-font-size);
+1083 |             white-space: pre-wrap;
+1084 |             word-break: break-all;
+1085 |             max-height: 200px;
+1086 |             overflow-y: auto;
+1087 |             color: var(--vscode-descriptionForeground);
+1088 |             background: var(--vscode-editor-background);
+1089 |         }
+1090 | 
+1091 |         .tool-call-block.expanded .tool-call-details {
+1092 |             display: block;
+1093 |         }
+[1m[7m%[27m[1m[0m                                                                           ]2;adeel@b0x:~/Desktop/DeepCode]1;..ktop/DeepCode]7;file://b0x.local/Users/adeel/Desktop/DeepCode\[0m[27m[24m[J[0m[49m[39m
+[0m[49m[37m[0m[37m[47m[38;5;232m [0m[38;5;232m[47m[47m[38;5;232m [0m[38;5;232m[47m[40m[37m[0m[37m[40m[40m[33m adeel[0m[33m[40m[40m[33m [0m[33m[40m[44m[30m[0m[30m[44m[44m[38;5;254m [1m[38;5;254m[44m[38;5;255m~[0m[38;5;255m[44m[44m[38;5;254m/[38;5;250mDe[0m[38;5;250m[44m[44m[38;5;254m/[1m[38;5;254m[44m[38;5;255mDeepCode[0m[38;5;255m[44m[44m[38;5;254m[0m[38;5;254m[44m[44m[38;5;254m [0m[38;5;254m[44m[43m[34m[0m[34m[43m[43m[30m on [30mmain [30m!4 [30m?1[0m[30m[43m[43m[30m [0m[30m[43m[49m[33m[0m[33m[49m[39m [0m[49m[39m[K[6C[0m[49m[30m[0m[30m[40m[32m [0m[32m[40m[40m[32m✔[0m[32m[40m[40m[32m [0m[32m[40m[40m[32m[37m[0m[37m[40m[47m[30m at 12:54:49 AM[0m[30m[47m[47m[30m[0m[30m[47m[47m[30m [49m[37m[0m[37m[47m[30m[0m[30m[47m[49m[39m[28D[?1h=[?2004h  pytho[Kn3 -c "[?1l>[?25l[?2004l[A[0m[27m[24m[J[0m[49m[27m[24m[38;5;76m❯[0m[38;5;76m[49m[39m[27m[24m  python3 -c "[K[?25h
+[0m[27m[24m[Jdquote> [K[?1h=[?2004hssrc = open('/Users/adeel/Desktop/DeepCode/src/sidebarProvider.ts'). [Krread()[?1l>[?2004l
+[0m[27m[24m[Jdquote> [K[?1h=[?2004h## Find all regex patterns in JS template section (after script tag) [K[K[?1l>[?2004l
+[0m[27m[24m[Jdquote> [K[?1h=[?2004hsscript_start = src.find('<script nonce=')[?1l>[?2004l
+[0m[27m[24m[Jdquote> [K[?1h=[?2004hsscript_end = src.rfind('</script>')[?1l>[?2004l
+[0m[27m[24m[Jdquote> [K[?1h=[?2004hsscript_section = src[script_start:script_end][?1l>[?2004l
+[0m[27m[24m[Jdquote> [K[?1h=[?2004hllines = script_section.split('\n')[?1l>[?2004l
+[0m[27m[24m[Jdquote> [K[?1h=[?2004h## Find lines with regex literals that contain unescaped forward sla [Ksshes[?1l>[?2004l
+[0m[27m[24m[Jdquote> [K[?1h=[?2004hffor i, line in enumerate(lines):[?1l>[?2004l
+[0m[27m[24m[Jdquote> [K[?1h=[?2004h     import re[?1l>[?2004l
+[0m[27m[24m[Jdquote> [K[?1h=[?2004h     # Look for regex literals that might have issues[?1l>[?2004l
+[0m[27m[24m[Jdquote> [K[?1h=[?2004h     if 'var ' in line and '/g' in line and '[/' in line:[?1l>[?2004l
+[0m[27m[24m[Jdquote> [K[?1h=[?2004h         print(i+1, repr(line[:140]))[?1l>[?2004l
+[0m[27m[24m[Jdquote> [K[?1h=[?2004h"" 2>&1 | head -60[?1l>[?2004l
+]2;python3 -c  2>&1 | head -60]1;python3517 "            var commentLine = [/\\\\/\\\\/[^\\\\n]*/g, 'tok-comment'];"
+518 "            var commentBlock = [/\\\\/\\\\*[\\\\s\\\\S]*?\\\\*\\\\//g, 'tok-comment'];"
+519 "            var commentHash = [/#[^\\\\n]*/g, 'tok-comment'];"
+520 "            var commentDash = [/--[^\\\\n]*/g, 'tok-comment'];"
+521 "            var strDouble = [/&quot;(?:[^&]|&(?!quot;))*?&quot;/g, 'tok-string'];"
+522 "            var strSingle = [/&#39;(?:[^&]|&(?!#39;))*?&#39;/g, 'tok-string'];"
+523 "            var strBacktick = [/\\`(?:[^\\`])*?\\`/g, 'tok-string'];"
+524 "            var strTriDouble = [/&quot;&quot;&quot;[\\\\s\\\\S]*?&quot;&quot;&quot;/g, 'tok-string'];"
+525 "            var strTriSingle = [/&#39;&#39;&#39;[\\\\s\\\\S]*?&#39;&#39;&#39;/g, 'tok-string'];"
+526 "            var numbers = [/\\\\b\\\\d+\\\\.?\\\\d*(?:e[+-]?\\\\d+)?\\\\b/gi, 'tok-number'];"
+527 "            var hexNumbers = [/\\\\b0x[\\\\da-f]+\\\\b/gi, 'tok-number'];"
+529 '            var jsKeywords = [/\\\\b(?:const|let|var|function|return|if|else|for|while|do|switch|case|break|continue|new|this|class|extends|im'
+530 '            var jsTypes = [/\\\\b(?:string|number|boolean|object|any|void|null|undefined|never|unknown|Array|Map|Set|Promise|Record|Partial|Re'
+531 '            var jsBuiltins = [/\\\\b(?:console|window|document|Math|JSON|Object|Array|String|Number|Boolean|RegExp|Date|Error|Promise|setTimeo'
+532 "            var jsFuncCall = [/\\\\b([a-zA-Z_$][\\\\w$]*)\\\\s*(?=\\\\()/g, 'tok-function'];"
+534 '            var pyKeywords = [/\\\\b(?:def|class|return|if|elif|else|for|while|break|continue|pass|import|from|as|try|except|finally|raise|wit'
+535 "            var pyTypes = [/\\\\b(?:int|float|str|bool|list|dict|tuple|set|bytes|type|object|None)\\\\b/g, 'tok-type'];"
+536 '            var pyBuiltins = [/\\\\b(?:print|len|range|enumerate|zip|map|filter|sorted|reversed|isinstance|issubclass|hasattr|getattr|setattr|'
+537 "            var pyDecorator = [/@[a-zA-Z_][\\\\w.]*/g, 'tok-keyword'];"
+538 "            var pyFuncCall = [/\\\\b([a-zA-Z_][\\\\w]*)\\\\s*(?=\\\\()/g, 'tok-function'];"
+540 "            var htmlTags = [/&lt;\\\\/?(\\\\w+)/g, 'tok-tag'];"
+541 "            var htmlAttrName = [/\\\\s([a-zA-Z\\\\-]+)(?==)/g, 'tok-attr-name'];"
+543 "            var cssKeywords = [/\\\\b(?:import|media|keyframes|font-face|supports|charset)\\\\b/g, 'tok-keyword'];"
+544 "            var cssProp = [/([a-z\\\\-]+)\\\\s*(?=:)/g, 'tok-property'];"
+545 "            var cssVal = [/:\\\\s*([^;{}]+)/g, 'tok-attr-value'];"
+546 "            var cssSelector = [/^\\\\s*([.#]?[a-zA-Z][\\\\w\\\\-*.#>+~, ]+)\\\\s*\\\\{/gm, 'tok-tag'];"
+548 "            var jsonKey = [/&quot;([^&]*?)&quot;\\\\s*(?=:)/g, 'tok-property'];"
+549 "            var jsonStr = [/:\\\\s*&quot;([^&]*?)&quot;/g, 'tok-string'];"
+550 "            var jsonBool = [/\\\\b(?:true|false|null)\\\\b/g, 'tok-keyword'];"
+552 '            var sqlKeywords = [/\\\\b(?:SELECT|FROM|WHERE|INSERT|INTO|UPDATE|SET|DELETE|CREATE|DROP|ALTER|TABLE|INDEX|VIEW|JOIN|LEFT|RIGHT|INN'
+554 '            var bashKeywords = [/\\\\b(?:if|then|else|elif|fi|for|while|do|done|case|esac|in|function|return|local|export|source|echo|exit|set'
+555 "            var bashVar = [/\\\\$[a-zA-Z_][\\\\w]*/g, 'tok-property'];"
+556 "            var bashVar2 = [/\\\\$\\\\{[^}]+\\\\}/g, 'tok-property'];"
+558 '            var rustKeywords = [/\\\\b(?:fn|let|mut|const|struct|enum|impl|trait|pub|use|mod|crate|self|super|match|if|else|for|while|loop|bre'
+559 '            var rustTypes = [/\\\\b(?:i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize|f32|f64|bool|char|str|String|Vec|Option|Result|Box|R'
+561 '            var goKeywords = [/\\\\b(?:func|var|const|type|struct|interface|map|chan|package|import|return|if|else|for|range|switch|case|defau'
+562 '            var goTypes = [/\\\\b(?:int|int8|int16|int32|int64|uint|uint8|uint16|uint32|uint64|float32|float64|complex64|complex128|string|boo'
+563 "            var goBuiltins = [/\\\\b(?:make|len|cap|append|copy|delete|new|close|panic|recover|print|println|nil|true|false|iota)\\\\b/g, 'tok-b"
+[1m[7m%[27m[1m[0m                                                                           ]2;adeel@b0x:~/Desktop/DeepCode]1;..ktop/DeepCode]7;file://b0x.local/Users/adeel/Desktop/DeepCode\[0m[27m[24m[J[0m[49m[39m
+[0m[49m[37m[0m[37m[47m[38;5;232m [0m[38;5;232m[47m[47m[38;5;232m [0m[38;5;232m[47m[40m[37m[0m[37m[40m[40m[33m adeel[0m[33m[40m[40m[33m [0m[33m[40m[44m[30m[0m[30m[44m[44m[38;5;254m [1m[38;5;254m[44m[38;5;255m~[0m[38;5;255m[44m[44m[38;5;254m/[38;5;250mDe[0m[38;5;250m[44m[44m[38;5;254m/[1m[38;5;254m[44m[38;5;255mDeepCode[0m[38;5;255m[44m[44m[38;5;254m[0m[38;5;254m[44m[44m[38;5;254m [0m[38;5;254m[44m[43m[34m[0m[34m[43m[43m[30m on [30mmain [30m!4 [30m?1[0m[30m[43m[43m[30m [0m[30m[43m[49m[33m[0m[33m[49m[39m [0m[49m[39m[K[6C[0m[49m[30m[0m[30m[40m[32m [0m[32m[40m[40m[32m✔[0m[32m[40m[40m[32m [0m[32m[40m[40m[32m[37m[0m[37m[40m[47m[30m at 12:55:51 AM[0m[30m[47m[47m[30m[0m[30m[47m[47m[30m [49m[37m[0m[37m[47m[30m[0m[30m[47m[49m[39m[28D[?1h=[?2004h  pytho[Kn3 << 'EOF'[?1l>[?25l[?2004l[A[0m[27m[24m[J[0m[49m[27m[24m[38;5;76m❯[0m[38;5;76m[49m[39m[27m[24m  python3 << 'EOF'[K[?25h
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hssrc = open('/Users/adeel/Desktop/DeepCode/src/sidebarProvider.ts') [K..read()[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hsscript_start = src.find('<script nonce=')[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hsscript_end = src.rfind('</script>')[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hsscript_section = src[script_start:script_end][?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hllines = script_section.split('\n')[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h## Look for any line containing a regex with just x.replace(/.../ p [Kaattern[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h## where the regex contains unescaped /[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hffor i, line in enumerate(lines):[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h     stripped = line.strip()[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h     # Find lines with s.replace( containing regex[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h     if 's.replace(/' in stripped or 's = s.replace(/' in stripped: [K[K[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h         print(f"Line {i+1}: {stripped[:160]}")[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hEEOF[?1l>[?2004l
+]2;python3 <<<'']1;python3Line 468: s = s.replace(/\`\`\`(\\w*)?\\n?([\\s\\S]*?)\`\`\`/g, function(m, lang, code) {
+Line 483: s = s.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
+Line 485: s = s.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
+Line 487: s = s.replace(/\\*(.+?)\\*/g, '<em>$1</em>');
+[1m[7m%[27m[1m[0m                                                                           ]2;adeel@b0x:~/Desktop/DeepCode]1;..ktop/DeepCode]7;file://b0x.local/Users/adeel/Desktop/DeepCode\[0m[27m[24m[J[0m[49m[39m
+[0m[49m[37m[0m[37m[47m[38;5;232m [0m[38;5;232m[47m[47m[38;5;232m [0m[38;5;232m[47m[40m[37m[0m[37m[40m[40m[33m adeel[0m[33m[40m[40m[33m [0m[33m[40m[44m[30m[0m[30m[44m[44m[38;5;254m [1m[38;5;254m[44m[38;5;255m~[0m[38;5;255m[44m[44m[38;5;254m/[38;5;250mDe[0m[38;5;250m[44m[44m[38;5;254m/[1m[38;5;254m[44m[38;5;255mDeepCode[0m[38;5;255m[44m[44m[38;5;254m[0m[38;5;254m[44m[44m[38;5;254m [0m[38;5;254m[44m[43m[34m[0m[34m[43m[43m[30m on [30mmain [30m!4 [30m?1[0m[30m[43m[43m[30m [0m[30m[43m[49m[33m[0m[33m[49m[39m [0m[49m[39m[K[6C[0m[49m[30m[0m[30m[40m[32m [0m[32m[40m[40m[32m✔[0m[32m[40m[40m[32m [0m[32m[40m[40m[32m[37m[0m[37m[40m[47m[30m at 01:04:49 AM[0m[30m[47m[47m[30m[0m[30m[47m[47m[30m [49m[37m[0m[37m[47m[30m[0m[30m[47m[49m[39m[28D[?1h=[?2004h  pytho[Kn3 << 'EOF'[?1l>[?25l[?2004l[A[0m[27m[24m[J[0m[49m[27m[24m[38;5;76m❯[0m[38;5;76m[49m[39m[27m[24m  python3 << 'EOF'[K[?25h
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hiimport re[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hssrc = open('/Users/adeel/Desktop/DeepCode/src/sidebarProvider.ts') [K..read()[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hsscript_start = src.find('<script nonce=')[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hsscript_end = src.rfind('</script>')[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hsscript_section = src[script_start:script_end][?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hllines = script_section.split('\n')[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h## The script section starts at HTML line ~1770[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h## Error at html:1086 is WITHIN the script at script line (1086-177 [K00) = negative -> not in script[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h## Let's compute: script section line count[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hpprint(f"Script section has {len(lines)} lines")[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hpprint(f"Script section starts at approx HTML line: ", end='')[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h## Count lines in the HTML before the script[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hffull_html = src[src.find('DOCTYPE html'):][?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004haall_lines = full_html.split('\n')[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hffor i, line in enumerate(all_lines):[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h     if '<script nonce=' in line:[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h         print(i+1)[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h         print(f"So script line 1 = HTML line {i+1}")[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h         print(f"HTML line 1086 = script line {1086 - i}")[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h         break[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hEEOF[?1l>[?2004l
+]2;python3 <<<'']1;python3Script section has 1521 lines
+Script section starts at approx HTML line: 1770
+So script line 1 = HTML line 1770
+HTML line 1086 = script line -683
+[1m[7m%[27m[1m[0m                                                                           ]2;adeel@b0x:~/Desktop/DeepCode]1;..ktop/DeepCode]7;file://b0x.local/Users/adeel/Desktop/DeepCode\[0m[27m[24m[J[0m[49m[39m
+[0m[49m[37m[0m[37m[47m[38;5;232m [0m[38;5;232m[47m[47m[38;5;232m [0m[38;5;232m[47m[40m[37m[0m[37m[40m[40m[33m adeel[0m[33m[40m[40m[33m [0m[33m[40m[44m[30m[0m[30m[44m[44m[38;5;254m [1m[38;5;254m[44m[38;5;255m~[0m[38;5;255m[44m[44m[38;5;254m/[38;5;250mDe[0m[38;5;250m[44m[44m[38;5;254m/[1m[38;5;254m[44m[38;5;255mDeepCode[0m[38;5;255m[44m[44m[38;5;254m[0m[38;5;254m[44m[44m[38;5;254m [0m[38;5;254m[44m[43m[34m[0m[34m[43m[43m[30m on [30mmain [30m!4 [30m?1[0m[30m[43m[43m[30m [0m[30m[43m[49m[33m[0m[33m[49m[39m [0m[49m[39m[K[6C[0m[49m[30m[0m[30m[40m[32m [0m[32m[40m[40m[32m✔[0m[32m[40m[40m[32m [0m[32m[40m[40m[32m[37m[0m[37m[40m[47m[30m at 01:05:22 AM[0m[30m[47m[47m[30m[0m[30m[47m[47m[30m [49m[37m[0m[37m[47m[30m[0m[30m[47m[49m[39m[28D[?1h=[?2004h  pytho[Kn3 << 'EOF'[?1l>[?25l[?2004l[A[0m[27m[24m[J[0m[49m[27m[24m[38;5;76m❯[0m[38;5;76m[49m[39m[27m[24m  python3 << 'EOF'[K[?25h
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hssrc = open('/Users/adeel/Desktop/DeepCode/src/sidebarProvider.ts') [K..read()[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hsscript_start = src.find('<script nonce=')[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hsscript_end = src.rfind('</script>')[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hsscript_section = src[script_start:script_end][?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hllines = script_section.split('\n')[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h## Print lines around 1086 within the script section[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hffor i in range(1082, 1092):[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h     if i < len(lines):[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h         print(f"script line {i+1}: {lines[i][:150]}")[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hEEOF[?1l>[?2004l
+]2;python3 <<<'']1;python3script line 1083:                     }
+script line 1084:                     currentStreamEl = null;
+script line 1085:                     currentStreamRaw = '';
+script line 1086:                     break;
+script line 1087:                 }
+script line 1088:                 case 'error': {
+script line 1089:                     isStreaming = false;
+script line 1090:                     document.getElementById('sendBtn').classList.remove('hidden');
+script line 1091:                     document.getElementById('sendBtn').disabled = false;
+script line 1092:                     document.getElementById('stopBtn').classList.add('hidden');
+[1m[7m%[27m[1m[0m                                                                           ]2;adeel@b0x:~/Desktop/DeepCode]1;..ktop/DeepCode]7;file://b0x.local/Users/adeel/Desktop/DeepCode\[0m[27m[24m[J[0m[49m[39m
+[0m[49m[37m[0m[37m[47m[38;5;232m [0m[38;5;232m[47m[47m[38;5;232m [0m[38;5;232m[47m[40m[37m[0m[37m[40m[40m[33m adeel[0m[33m[40m[40m[33m [0m[33m[40m[44m[30m[0m[30m[44m[44m[38;5;254m [1m[38;5;254m[44m[38;5;255m~[0m[38;5;255m[44m[44m[38;5;254m/[38;5;250mDe[0m[38;5;250m[44m[44m[38;5;254m/[1m[38;5;254m[44m[38;5;255mDeepCode[0m[38;5;255m[44m[44m[38;5;254m[0m[38;5;254m[44m[44m[38;5;254m [0m[38;5;254m[44m[43m[34m[0m[34m[43m[43m[30m on [30mmain [30m!4 [30m?1[0m[30m[43m[43m[30m [0m[30m[43m[49m[33m[0m[33m[49m[39m [0m[49m[39m[K[6C[0m[49m[30m[0m[30m[40m[32m [0m[32m[40m[40m[32m✔[0m[32m[40m[40m[32m [0m[32m[40m[40m[32m[37m[0m[37m[40m[47m[30m at 01:05:42 AM[0m[30m[47m[47m[30m[0m[30m[47m[47m[30m [49m[37m[0m[37m[47m[30m[0m[30m[47m[49m[39m[28D[?1h=[?2004h  pytho[Kn3 << 'EOF'[?1l>[?25l[?2004l[A[0m[27m[24m[J[0m[49m[27m[24m[38;5;76m❯[0m[38;5;76m[49m[39m[27m[24m  python3 << 'EOF'[K[?25h
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hssrc = open('/Users/adeel/Desktop/DeepCode/src/sidebarProvider.ts') [K..read()[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hsscript_start = src.find('<script nonce=')[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hsscript_end = src.rfind('</script>')[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hsscript_section = src[script_start:script_end][?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hllines = script_section.split('\n')[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h## Print the area around the new todos helpers (approx line 316-420 [K)[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hffor i in range(315, 360):[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h     if i < len(lines):[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h         print(f"{i+1}: {lines[i][:160]}")[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hEEOF[?1l>[?2004l
+]2;python3 <<<'']1;python3316:                 addMessage(msg.role, msg.content);
+317:             }
+318:             closeSettings();
+319:         }
+320: 
+321:         function escapeHtml(str) {
+322:             return str.replace(/&/g, '&amp;').replace(/\x3c/g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;');
+323:         }
+324: 
+325:         /* ── Todos / Files-changed helpers ──────────────────── */
+326:         const CHEVRON_SVG = '<svg class="tc-chevron" viewBox="0 0 16 16"><polyline points="6 4 10 8 6 12"/></svg>';
+327:         const SPIN_ICON  = '<svg viewBox="0 0 16 16"><path d="M8 1.5A6.5 6.5 0 1 0 14.5 8" stroke-width="1.5"/></svg>';
+328:         const DONE_ICON  = '<svg viewBox="0 0 16 16"><polyline points="3.5 8.5 6.5 11.5 12.5 5.5"/></svg>';
+329:         const FAIL_ICON  = '<svg viewBox="0 0 16 16"><line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg>';
+330: 
+331:         function getOrCreateTodosCard() {
+332:             if (todosCard && todosCard.isConnected) return todosCard;
+333:             if (!currentStreamEl) return null;
+334:             todosCard = document.createElement('div');
+335:             todosCard.className = 'todos-card';
+336:             // Will be appended after innerHTML replacement via streamToken
+337:             currentStreamEl.appendChild(todosCard);
+338:             return todosCard;
+339:         }
+340: 
+341:         function updateTodosCard() {
+342:             const card = getOrCreateTodosCard();
+343:             if (!card) return;
+344: 
+345:             const todos = Object.entries(fileTodosMap);
+346:             const doneCount = todos.filter(function(e) { return e[1] === 'done'; }).length;
+347:             const changed = Object.entries(fileChangesMap);
+348:             const totalAdded   = changed.reduce(function(s, e) { return s + e[1].added;   }, 0);
+349:             const totalRemoved = changed.reduce(function(s, e) { return s + e[1].removed; }, 0);
+350: 
+351:             let html = '';
+352: 
+353:             // ─ Todos section ─
+354:             if (todos.length > 0) {
+355:                 html += '<div class="tc-section" id="tc-todos-sec">';
+356:                 html += '<div class="tc-section-header" onclick="toggleSection(this)">'
+357:                     + CHEVRON_SVG
+358:                     + '<span class="tc-section-title">Todos</span>'
+359:                     + '<span class="tc-count">(' + doneCount + '/' + todos.length + ')</span>'
+360:                     + '</div>';
+[1m[7m%[27m[1m[0m                                                                           ]2;adeel@b0x:~/Desktop/DeepCode]1;..ktop/DeepCode]7;file://b0x.local/Users/adeel/Desktop/DeepCode\[0m[27m[24m[J[0m[49m[39m
+[0m[49m[37m[0m[37m[47m[38;5;232m [0m[38;5;232m[47m[47m[38;5;232m [0m[38;5;232m[47m[40m[37m[0m[37m[40m[40m[33m adeel[0m[33m[40m[40m[33m [0m[33m[40m[44m[30m[0m[30m[44m[44m[38;5;254m [1m[38;5;254m[44m[38;5;255m~[0m[38;5;255m[44m[44m[38;5;254m/[38;5;250mDe[0m[38;5;250m[44m[44m[38;5;254m/[1m[38;5;254m[44m[38;5;255mDeepCode[0m[38;5;255m[44m[44m[38;5;254m[0m[38;5;254m[44m[44m[38;5;254m [0m[38;5;254m[44m[43m[34m[0m[34m[43m[43m[30m on [30mmain [30m!4 [30m?1[0m[30m[43m[43m[30m [0m[30m[43m[49m[33m[0m[33m[49m[39m [0m[49m[39m[K[6C[0m[49m[30m[0m[30m[40m[32m [0m[32m[40m[40m[32m✔[0m[32m[40m[40m[32m [0m[32m[40m[40m[32m[37m[0m[37m[40m[47m[30m at 01:06:13 AM[0m[30m[47m[47m[30m[0m[30m[47m[47m[30m [49m[37m[0m[37m[47m[30m[0m[30m[47m[49m[39m[28D[?1h=[?2004h  pytho[Kn3 << 'EOF'[?1l>[?25l[?2004l[A[0m[27m[24m[J[0m[49m[27m[24m[38;5;76m❯[0m[38;5;76m[49m[39m[27m[24m  python3 << 'EOF'[K[?25h
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hssrc = open('/Users/adeel/Desktop/DeepCode/src/sidebarProvider.ts') [K..read()[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h## Find the new todos CSS block[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hsstart = src.find('/* ── Todos + Files Changed card')[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004heend = src.find('.process-bar .elapsed-time')[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hnnew_css = src[start:end][?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h## Look for anything suspicious[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hffor i, line in enumerate(new_css.split('\n')):[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h     if '</' in line or '</style>' in line.lower() or '</script>' i [Knn line.lower():[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h         print(f"Found suspicious: {i}: {line}")[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h## Also check: look for any unbalanced braces in new css[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hpprint("Brace check:")[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hoopens = new_css.count('{')[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hccloses = new_css.count('}')[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hpprint(f"  Opens: {opens}, Closes: {closes}")[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hEEOF[?1l>[?2004l
+]2;python3 <<<'']1;python3Brace check:
+  Opens: 33, Closes: 33
+[1m[7m%[27m[1m[0m                                                                           ]2;adeel@b0x:~/Desktop/DeepCode]1;..ktop/DeepCode]7;file://b0x.local/Users/adeel/Desktop/DeepCode\[0m[27m[24m[J[0m[49m[39m
+[0m[49m[37m[0m[37m[47m[38;5;232m [0m[38;5;232m[47m[47m[38;5;232m [0m[38;5;232m[47m[40m[37m[0m[37m[40m[40m[33m adeel[0m[33m[40m[40m[33m [0m[33m[40m[44m[30m[0m[30m[44m[44m[38;5;254m [1m[38;5;254m[44m[38;5;255m~[0m[38;5;255m[44m[44m[38;5;254m/[38;5;250mDe[0m[38;5;250m[44m[44m[38;5;254m/[1m[38;5;254m[44m[38;5;255mDeepCode[0m[38;5;255m[44m[44m[38;5;254m[0m[38;5;254m[44m[44m[38;5;254m [0m[38;5;254m[44m[43m[34m[0m[34m[43m[43m[30m on [30mmain [30m!4 [30m?1[0m[30m[43m[43m[30m [0m[30m[43m[49m[33m[0m[33m[49m[39m [0m[49m[39m[K[6C[0m[49m[30m[0m[30m[40m[32m [0m[32m[40m[40m[32m✔[0m[32m[40m[40m[32m [0m[32m[40m[40m[32m[37m[0m[37m[40m[47m[30m at 01:06:48 AM[0m[30m[47m[47m[30m[0m[30m[47m[47m[30m [49m[37m[0m[37m[47m[30m[0m[30m[47m[49m[39m[28D[?1h=[?2004h  pytho[Kn3 << 'EOF'[?1l>[?25l[?2004l[A[0m[27m[24m[J[0m[49m[27m[24m[38;5;76m❯[0m[38;5;76m[49m[39m[27m[24m  python3 << 'EOF'[K[?25h
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hiimport re[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hssrc = open('/Users/adeel/Desktop/DeepCode/src/sidebarProvider.ts') [K..read()[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hsscript_start = src.find('<script nonce=')[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hsscript_end = src.rfind('</script>')[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hsscript_section = src[script_start:script_end][?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h## Simulate template literal processing (\\X -> \X)[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h## In TypeScript template literal: \\ -> \, \n -> newline, \t -> ta [Kbb, \` -> `[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h## For our purposes, count actual backslashes in patterns[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hllines = script_section.split('\n')[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h## Find lines containing regex literals[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hffor i, line in enumerate(lines):[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h     # Look for / ... / patterns that are regex literals (not comme [Knnts or division)[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h     # Simple heuristic: line has /.../ with flags like g, i, m[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h     matches = re.finditer(r'(?<!\w)/([^/\n]+)/[gim]*', line)[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h     for m in matches:[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h         pattern = m.group(1)[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h         # Count unescaped forward slashes in pattern[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h         j = 0[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h         while j < len(pattern):[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h             if pattern[j] == '\\':[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h                 j += 2  # skip escaped char[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h                 continue[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h             if pattern[j] == '/':[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h          import re[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hssrc = NEsrc = op iscript_start = src.find('<script nonce=')[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hsscript_end = src.rfind('</scrit(script_end = src.rfind('</script>' [K)[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hsscri  script_section = src[script_start:ip[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h## Simulate template literal proces cat > /tmp/scan_regex.mjs << 'S [KCCRIPT'[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hiimport { readFileSync } from 'fs';[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hcconst src = readFileSync('/Users/adeel/Desktop/DeepCode/src/sideba [KrrProvider.ts','utf8');[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hcconst scriptStart = src.indexOf('<script nonce=');[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hcconst scriptEnd = src.lastIndexOf('</script>');[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hcconst scriptSection = src.slice(scriptStart, scriptEnd);[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hcconst lines = scriptSection.split('\n');[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hffor (let i = 0; i < lines.length; i++) {[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h     const line = lines[i];[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h     for (const m of line.matchAll(/(?<![*\w])\/([^/\n]{3,})\/[gim] [K**/g)) {[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h         const pattern = m[1];[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h         let j = 0;[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h         while (j < pattern.length) {[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h             if (pattern[j] === '\\') { j += 2; continue; }[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h             if (pattern[j] === '/') {[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h                 process.stdout.write('ISSUE at script line ' + (i+ [K11) + ': ' + line.trim().substring(0,110) + '\n');[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h                 break;[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h             }[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h             j++;[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h         }[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h     }[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h}[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hpprocess.stdout.write('Scanned ' + lines.length + ' lines\n');[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hSSCRIPT[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004hnnode /tmp/scan_regex.mjs[?1l>[?2004l
+[0m[27m[24m[Jheredoc> [K[?1h=[?2004h
