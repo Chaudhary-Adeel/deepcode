@@ -2965,6 +2965,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         document.getElementById('settingsBtn').addEventListener('click', () => openSettings());
         document.getElementById('modalCloseBtn').addEventListener('click', () => closeSettings());
 
+        // Event delegation for dynamically-created elements (CSP blocks inline onclick attrs)
+        document.getElementById('chatMessages').addEventListener('click', function(e) {
+            const btn = e.target.closest('[data-action]');
+            if (!btn) return;
+            const action = btn.dataset.action;
+            if (action === 'keep-changes') { e.stopPropagation(); keepChanges(); }
+            else if (action === 'undo-changes') { e.stopPropagation(); undoChanges(); }
+            else if (action === 'toggle-section') { toggleSection(btn); }
+            else if (action === 'toggle-tc-files') { toggleTcFiles(e, btn); }
+            else if (action === 'toggle-code-block') { toggleCodeBlock(btn); }
+        });
+
         // --- Wire up settings controls ---
         document.getElementById('setting-model').addEventListener('change', function() { updateSetting('model', this.value); });
         document.getElementById('setting-temperature').addEventListener('input', function() {
@@ -3271,7 +3283,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             // ─ Todos section ─
             if (todos.length > 0) {
                 html += '<div class="tc-section" id="tc-todos-sec">';
-                html += '<div class="tc-section-header" onclick="toggleSection(this)">'
+                html += '<div class="tc-section-header" data-action="toggle-section">'
                     + CHEVRON_SVG
                     + '<span class="tc-section-title">Todos</span>'
                     + '<span class="tc-count">(' + doneCount + '/' + todos.length + ')</span>'
@@ -3294,12 +3306,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const statsHtml = (totalAdded   > 0 ? '<span class="tc-stat-added">+' + totalAdded + '</span> ' : '')
                                 + (totalRemoved > 0 ? '<span class="tc-stat-removed">-' + totalRemoved + '</span>' : '');
                 html += '<div class="tc-section" id="tc-files-sec">';
-                html += '<div class="tc-section-header" onclick="toggleTcFiles(event, this)">';
+                html += '<div class="tc-section-header" data-action="toggle-tc-files">';
                 html += CHEVRON_SVG;
                 html += '<span class="fc-title">' + changed.length + ' file' + (changed.length > 1 ? 's' : '') + ' changed&nbsp;' + statsHtml + '</span>';
                 html += '<div class="fc-actions">'
-                    + '<button class="tc-btn-keep" onclick="event.stopPropagation();keepChanges()">Keep</button>'
-                    + '<button class="tc-btn-undo" id="tcUndoBtn" onclick="event.stopPropagation();undoChanges()">Undo</button>'
+                    + '<button class="tc-btn-keep" data-action="keep-changes">Keep</button>'
+                    + '<button class="tc-btn-undo" id="tcUndoBtn" data-action="undo-changes">Undo</button>'
                     + '</div>';
                 html += '</div>';
                 html += '<div class="tc-items">';
@@ -3390,7 +3402,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const langLabel = lang ? '<span class="code-lang-label">' + lang + '</span>' : '';
                 const highlighted = highlightCode(trimmed, lang || '');
                 if (isLong) {
-                    const expandBtn = '<button class="code-expand-btn" onclick="toggleCodeBlock(this)" title="Expand">'  
+                    const expandBtn = '<button class="code-expand-btn" data-action="toggle-code-block" title="Expand">'
                         + '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="10" height="10"><path d="M2 5V2h3M11 2h3v3M14 11v3h-3M5 14H2v-3"/></svg>'
                         + '</button>';
                     return '<div class="code-block-wrapper collapsible has-expand-btn">' + langLabel + expandBtn + '<pre><code>' + highlighted + '</code></pre></div>';
