@@ -162,6 +162,9 @@ export class SubAgentService {
         topP: number,
         onStatus?: (status: string) => void,
         checkCancelled?: () => boolean,
+        onToolCall?: (toolName: string, args: Record<string, any>) => void,
+        onToolResult?: (toolName: string, result: ToolCallResult) => void,
+        onLLMReason?: (reasoning: string) => void,
     ): Promise<OrchestratedResponse> {
         onStatus?.('Building workspace context...');
         if (checkCancelled?.()) { throw new Error('Cancelled'); }
@@ -196,6 +199,9 @@ export class SubAgentService {
             tools: AGENT_TOOLS,
             toolExecutor,
             onProgress: onStatus,
+            onToolCall,
+            onToolResult,
+            onLLMReason,
             checkCancelled,
         });
 
@@ -283,6 +289,7 @@ export class SubAgentService {
         onToolResult?: (toolName: string, result: ToolCallResult) => void,
         checkCancelled?: () => boolean,
         onToken?: (token: string) => void,
+        onLLMReason?: (reasoning: string) => void,
     ): Promise<AgentLoopResult> {
         const toolExecutor = new ToolExecutor();
         const contextManager = new ContextManager();
@@ -370,7 +377,6 @@ export class SubAgentService {
             } catch { /* best effort */ }
 
             // Intent Agent
-            onStatus?.('Classifying request...');
             onToolCall?.('intent_agent', { task: 'Classifying user intent' });
             try {
                 const intentAgent = new IntentAgent(apiKey, model);
@@ -407,7 +413,6 @@ export class SubAgentService {
 
             // ── Stage 2: Planner (complex tasks only) ───────────────────
             if (intent && (intent.complexity === 'complex' || intent.complexity === 'moderate')) {
-                onStatus?.('Planning approach...');
                 onToolCall?.('planner_agent', { task: 'Planning implementation' });
                 try {
                     const plannerAgent = new PlannerAgent(apiKey, model);
@@ -461,7 +466,6 @@ export class SubAgentService {
 
             // ── Stage 3: Reference Miner (unfamiliar libs) ──────────────
             if (intent?.needsExternalRef) {
-                onStatus?.('Searching for reference examples...');
                 onToolCall?.('reference_miner', { task: 'Finding code examples' });
                 try {
                     const miner = new ReferenceMiner(apiKey, model);
@@ -556,6 +560,7 @@ export class SubAgentService {
             onToolCall,
             onToolResult,
             onToken,
+            onLLMReason,
             checkCancelled,
         });
 
@@ -581,7 +586,6 @@ export class SubAgentService {
         );
 
         if (verifyCommand && madeCodeChanges) {
-            onStatus?.('Verifying changes...');
             onToolCall?.('verifier', { command: verifyCommand });
             try {
                 const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';

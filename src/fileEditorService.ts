@@ -192,17 +192,12 @@ export class FileEditorService {
                     newContent = newContent.replace(match[0], edit.newText);
                     appliedCount++;
                 } else {
-                    vscode.window.showWarningMessage(
-                        `Could not find text to replace: "${edit.oldText.substring(0, 80)}..."`
-                    );
+                    // could not find match — skip silently
                 }
             }
         }
 
         if (appliedCount === 0) {
-            vscode.window.showErrorMessage(
-                `DeepCode: No edits could be applied. The file may have changed since the edit was proposed.`
-            );
             return false;
         }
 
@@ -223,9 +218,6 @@ export class FileEditorService {
             } catch {
                 // Non-critical — edit was applied, save failed
             }
-            vscode.window.showInformationMessage(
-                `DeepCode: Applied ${appliedCount}/${editResult.edits.length} edit(s). ${editResult.explanation}`
-            );
         }
 
         return success;
