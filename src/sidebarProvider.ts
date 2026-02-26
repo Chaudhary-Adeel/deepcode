@@ -10,6 +10,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private _chatHistory: Array<{role: string, content: string}> = [];
     private _isCancelled = false;
     private _autoApproveEdits = false;
+    /** Accumulated file originals during the current agent run — cleared on each new run, used for Undo */
+    private _pendingFileChanges = new Map<string, string>(); // relPath → originalContent
     private _pendingEdit: {
         editResult: import('./fileEditorService').EditResult;
         targetDocument: vscode.TextDocument;
@@ -262,6 +264,26 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 case 'rejectEdit': {
                     this._pendingEdit = null;
                     this._view?.webview.postMessage({ type: 'editCancelled' });
+                    break;
+                }
+                case 'undoChanges': {
+                    // Revert all files changed during the last agent run
+                    const errors: string[] = [];
+                    for (const [relPath, originalContent] of this._pendingFileChanges) {
+                        try {
+                            const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+                            const fullPath = relPath.startsWith('/') ? relPath : `${workspaceRoot}/${relPath}`;
+                            const uri = vscode.Uri.file(fullPath);
+                            await vscode.workspace.fs.writeFile(uri, Buffer.from(originalContent, 'utf-8'));
+                        } catch (e: any) {
+                            errors.push(relPath);
+                        }
+                    }
+                    this._pendingFileChanges.clear();
+                    this._view?.webview.postMessage({
+                        type: 'undoComplete',
+                        errors,
+                    });
                     break;
                 }
             }
@@ -553,6 +575,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
 
         this._isCancelled = false;
+        this._pendingFileChanges.clear();
         this._chatHistory.push({ role: 'user', content: actualMessage });
 
         this._view?.webview.postMessage({ type: 'streamStart' });
@@ -616,6 +639,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 // onLLMReason — show why the agent is calling a tool
                 (reasoning) => {
                     this._view?.webview.postMessage({ type: 'llmReasoning', text: reasoning });
+                },
+                // onFileChanged — track file changes for todos + files-changed panel
+                (fileChange) => {
+                    this._pendingFileChanges.set(fileChange.relPath, fileChange.originalContent);
+                    this._view?.webview.postMessage({ type: 'fileChange', ...fileChange });
                 },
             );
 
@@ -798,6 +826,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
 
         this._isCancelled = false;
+        this._pendingFileChanges.clear();
         // Use streamStart so the message bubble + activity feed exist for live tool call blocks
         this._view?.webview.postMessage({ type: 'streamStart' });
 
@@ -858,6 +887,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 (reasoning) => {
                     this._view?.webview.postMessage({ type: 'llmReasoning', text: reasoning });
                 },
+                // onFileChanged not passed here — the edit-proposal diff view covers file changes
+                undefined,
             );
 
             // Try to get a structured edit result.
@@ -1997,6 +2028,94 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             transform: rotate(90deg);
         }
 
+        /* ── Todos + Files Changed card ─────────────────── */
+        .todos-card {
+            margin: 6px 0 2px;
+            border: 1px solid var(--vscode-editorGroup-border, rgba(255,255,255,0.1));
+            border-radius: 5px;
+            overflow: hidden;
+            font-size: 11px;
+            background: var(--vscode-editor-background);
+        }
+        .tc-section {
+            border-bottom: 1px solid var(--vscode-editorGroup-border, rgba(255,255,255,0.07));
+        }
+        .tc-section:last-child { border-bottom: none; }
+        .tc-section-header {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            padding: 5px 10px;
+            cursor: pointer;
+            user-select: none;
+            background: var(--vscode-editor-inactiveSelectionBackground, rgba(255,255,255,0.03));
+        }
+        .tc-section-header:hover { background: var(--vscode-toolbar-hoverBackground); }
+        .tc-chevron {
+            flex-shrink: 0;
+            width: 9px; height: 9px;
+            fill: none; stroke: var(--vscode-descriptionForeground);
+            stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+            transition: transform 0.15s;
+        }
+        .tc-section.collapsed .tc-chevron { transform: rotate(-90deg); }
+        .tc-section.collapsed .tc-items { display: none; }
+        .tc-section-title { flex: 1; color: var(--vscode-foreground); font-size: 11px; }
+        .tc-count { color: var(--vscode-descriptionForeground); font-size: 10px; margin-left: 2px; }
+        .tc-items { padding: 2px 0; }
+        .tc-item {
+            display: flex; align-items: center; gap: 6px;
+            padding: 2px 10px 2px 14px;
+            color: var(--vscode-descriptionForeground);
+        }
+        .tc-icon {
+            flex-shrink: 0; width: 12px; height: 12px;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .tc-icon svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+        .tc-icon.tc-pending svg { animation: spin 0.8s linear infinite; color: var(--vscode-textLink-foreground); }
+        .tc-icon.tc-done svg { color: var(--vscode-testing-iconPassed, #73c991); }
+        .tc-icon.tc-fail svg { color: var(--vscode-testing-iconFailed, #f14c4c); }
+        .tc-file-label { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+        .fc-title { flex: 1; color: var(--vscode-foreground); font-size: 11px; }
+        .tc-stat-added { color: var(--vscode-gitDecoration-addedResourceForeground, #73c991); font-weight: 600; }
+        .tc-stat-removed { color: var(--vscode-gitDecoration-deletedResourceForeground, #f14c4c); font-weight: 600; }
+        .fc-actions { display: flex; gap: 5px; margin-left: auto; align-items: center; }
+        .tc-btn-keep, .tc-btn-undo {
+            padding: 1px 9px; border-radius: 3px; font-size: 10px;
+            cursor: pointer; border: 1px solid transparent; font-family: inherit;
+        }
+        .tc-btn-keep {
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+        }
+        .tc-btn-keep:hover { background: var(--vscode-button-hoverBackground); }
+        .tc-btn-undo {
+            background: transparent;
+            color: var(--vscode-textLink-foreground);
+            border-color: var(--vscode-textLink-foreground) !important;
+        }
+        .tc-btn-undo:hover { background: rgba(255,255,255,0.05); }
+        .tc-btn-undo:disabled { opacity: 0.5; cursor: default; }
+        .fc-item {
+            display: flex; align-items: center; gap: 7px;
+            padding: 2px 10px 2px 14px;
+            color: var(--vscode-descriptionForeground); font-size: 11px;
+        }
+        .fc-badge {
+            flex-shrink: 0; padding: 0 4px; border-radius: 2px;
+            font-size: 9px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase;
+            font-family: var(--vscode-editor-font-family, monospace);
+            background: var(--vscode-editor-inactiveSelectionBackground, rgba(255,255,255,0.15));
+            color: var(--vscode-descriptionForeground);
+        }
+        .fc-filename { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .fc-diff { display: flex; gap: 5px; flex-shrink: 0; font-size: 10px; font-weight: 600; }
+        .tc-msg {
+            padding: 5px 10px; font-style: italic;
+            color: var(--vscode-descriptionForeground); font-size: 11px;
+        }
+
         .process-bar .elapsed-time {
             margin-left: auto;
             font-variant-numeric: tabular-nums;
@@ -2805,6 +2924,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         let sessionTokens = 0;
         let chatTokens = 0;
         let messageCount = 0;
+        // Todos + files-changed tracking
+        let fileTodosMap = {};   // relPath → 'pending' | 'done' | 'failed'
+        let fileChangesMap = {}; // relPath → {added, removed}
+        let todosCard = null;    // the .todos-card DOM element for the current run
 
         // --- Settings Modal ---
         function openSettings() {
@@ -3117,6 +3240,116 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             return str.replace(/&/g, '&amp;').replace(/\x3c/g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;');
         }
 
+        /* ── Todos / Files-changed helpers ──────────────────── */
+        const CHEVRON_SVG = '<svg class="tc-chevron" viewBox="0 0 16 16"><polyline points="6 4 10 8 6 12"/></svg>';
+        const SPIN_ICON  = '<svg viewBox="0 0 16 16"><path d="M8 1.5A6.5 6.5 0 1 0 14.5 8" stroke-width="1.5"/></svg>';
+        const DONE_ICON  = '<svg viewBox="0 0 16 16"><polyline points="3.5 8.5 6.5 11.5 12.5 5.5"/></svg>';
+        const FAIL_ICON  = '<svg viewBox="0 0 16 16"><line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg>';
+
+        function getOrCreateTodosCard() {
+            if (todosCard && todosCard.isConnected) return todosCard;
+            if (!currentStreamEl) return null;
+            todosCard = document.createElement('div');
+            todosCard.className = 'todos-card';
+            // Will be appended after innerHTML replacement via streamToken
+            currentStreamEl.appendChild(todosCard);
+            return todosCard;
+        }
+
+        function updateTodosCard() {
+            const card = getOrCreateTodosCard();
+            if (!card) return;
+
+            const todos = Object.entries(fileTodosMap);
+            const doneCount = todos.filter(function(e) { return e[1] === 'done'; }).length;
+            const changed = Object.entries(fileChangesMap);
+            const totalAdded   = changed.reduce(function(s, e) { return s + e[1].added;   }, 0);
+            const totalRemoved = changed.reduce(function(s, e) { return s + e[1].removed; }, 0);
+
+            let html = '';
+
+            // ─ Todos section ─
+            if (todos.length > 0) {
+                html += '<div class="tc-section" id="tc-todos-sec">';
+                html += '<div class="tc-section-header" onclick="toggleSection(this)">'
+                    + CHEVRON_SVG
+                    + '<span class="tc-section-title">Todos</span>'
+                    + '<span class="tc-count">(' + doneCount + '/' + todos.length + ')</span>'
+                    + '</div>';
+                html += '<div class="tc-items">';
+                for (const [relPath, status] of todos) {
+                    const fileName = relPath.split('/').pop() || relPath;
+                    const iconClass = status === 'done' ? 'tc-done' : status === 'failed' ? 'tc-fail' : 'tc-pending';
+                    const icon = status === 'done' ? DONE_ICON : status === 'failed' ? FAIL_ICON : SPIN_ICON;
+                    html += '<div class="tc-item">'
+                        + '<span class="tc-icon ' + iconClass + '">' + icon + '</span>'
+                        + '<span class="tc-file-label" title="' + escapeHtml(relPath) + '">' + escapeHtml(fileName) + '</span>'
+                        + '</div>';
+                }
+                html += '</div></div>';
+            }
+
+            // ─ Files changed section ─
+            if (changed.length > 0) {
+                const statsHtml = (totalAdded   > 0 ? '<span class="tc-stat-added">+' + totalAdded + '</span> ' : '')
+                                + (totalRemoved > 0 ? '<span class="tc-stat-removed">-' + totalRemoved + '</span>' : '');
+                html += '<div class="tc-section" id="tc-files-sec">';
+                html += '<div class="tc-section-header" onclick="toggleTcFiles(event, this)">';
+                html += CHEVRON_SVG;
+                html += '<span class="fc-title">' + changed.length + ' file' + (changed.length > 1 ? 's' : '') + ' changed&nbsp;' + statsHtml + '</span>';
+                html += '<div class="fc-actions">'
+                    + '<button class="tc-btn-keep" onclick="event.stopPropagation();keepChanges()">Keep</button>'
+                    + '<button class="tc-btn-undo" id="tcUndoBtn" onclick="event.stopPropagation();undoChanges()">Undo</button>'
+                    + '</div>';
+                html += '</div>';
+                html += '<div class="tc-items">';
+                for (const [relPath, fc] of changed) {
+                    const fileName = relPath.split('/').pop() || relPath;
+                    const ext = (fileName.split('.').pop() || '').toUpperCase().substring(0, 4);
+                    html += '<div class="fc-item">'
+                        + '<span class="fc-badge">' + escapeHtml(ext) + '</span>'
+                        + '<span class="fc-filename" title="' + escapeHtml(relPath) + '">' + escapeHtml(relPath) + '</span>'
+                        + '<span class="fc-diff">'
+                        + (fc.added   > 0 ? '<span class="tc-stat-added">+' + fc.added + '</span>' : '')
+                        + (fc.removed > 0 ? '<span class="tc-stat-removed">\u2212' + fc.removed + '</span>' : '')
+                        + '</span>'
+                        + '</div>';
+                }
+                html += '</div></div>';
+            }
+
+            card.innerHTML = html;
+            const msgs = document.getElementById('chatMessages');
+            if (msgs) msgs.scrollTop = msgs.scrollHeight;
+        }
+
+        function toggleSection(el) {
+            el.closest('.tc-section').classList.toggle('collapsed');
+        }
+
+        function toggleTcFiles(event, header) {
+            header.closest('.tc-section').classList.toggle('collapsed');
+        }
+
+        function keepChanges() {
+            fileChangesMap = {};
+            if (todosCard) {
+                var sec = document.getElementById('tc-files-sec');
+                if (sec) { sec.innerHTML = '<div class="tc-msg">✓ Changes kept</div>'; }
+                setTimeout(function() {
+                    var s = document.getElementById('tc-files-sec');
+                    if (s) s.remove();
+                    if (todosCard && !todosCard.querySelector('.tc-section')) { todosCard.remove(); todosCard = null; }
+                }, 1200);
+            }
+        }
+
+        function undoChanges() {
+            const btn = document.getElementById('tcUndoBtn');
+            if (btn) { btn.disabled = true; btn.textContent = 'Reverting…'; }
+            vscode.postMessage({ type: 'undoChanges' });
+        }
+
         function toggleCodeBlock(btn) {
             var wrapper = btn.closest('.code-block-wrapper');
             var isExpanded = wrapper.classList.toggle('expanded');
@@ -3152,7 +3385,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             // Code blocks (fenced) — with syntax highlighting
             s = s.replace(/\`\`\`(\\w*)?\\n?([\\s\\S]*?)\`\`\`/g, function(m, lang, code) {
                 const trimmed = code.trim();
-                const lineCount = (trimmed.match(/\n/g) || []).length + 1;
+                const lineCount = (trimmed.match(/\\n/g) || []).length + 1;
                 const isLong = lineCount > 5;
                 const langLabel = lang ? '<span class="code-lang-label">' + lang + '</span>' : '';
                 const highlighted = highlightCode(trimmed, lang || '');
@@ -3634,6 +3867,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 case 'streamStart': {
                     isStreaming = true;
                     currentStreamRaw = '';
+                    fileTodosMap = {};
+                    fileChangesMap = {};
+                    todosCard = null;
                     document.getElementById('sendBtn').classList.add('hidden');
                     document.getElementById('stopBtn').classList.remove('hidden');
                     currentStreamEl = addMessage('assistant', '');
@@ -3689,6 +3925,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         currentStreamEl.innerHTML = formatContent(currentStreamRaw);
                         for (var pi = preservedEls.length - 1; pi >= 0; pi--) {
                             currentStreamEl.insertBefore(preservedEls[pi], currentStreamEl.firstChild);
+                        }
+                        // Re-append todos card (lives at end, survives innerHTML replacement)
+                        if (todosCard && !todosCard.isConnected) {
+                            currentStreamEl.appendChild(todosCard);
                         }
                         const messages = document.getElementById('chatMessages');
                         messages.scrollTop = messages.scrollHeight;
@@ -3865,6 +4105,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     document.getElementById('sendBtn').disabled = false;
                     document.getElementById('stopBtn').classList.add('hidden');
                     hideProcessBar();
+                    // Clear any dangling todos card — the diff view replaces it
+                    if (todosCard) { todosCard.remove(); todosCard = null; }
+                    fileTodosMap = {}; fileChangesMap = {};
 
                     // Finalise the tool-call message bubble created by streamStart:
                     // collapse the activity feed so users can expand it, then keep
@@ -4112,7 +4355,22 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
                 case 'toolCall': {
-                    // Tool call blocks removed — activity-feed steps carry the detail now.
+                    // Track file-editing tool calls as todos in the todos card
+                    const FILE_WRITE_TOOLS = ['edit_file', 'write_file', 'multi_edit_files'];
+                    if (FILE_WRITE_TOOLS.includes(data.name)) {
+                        var todoPaths = [];
+                        if (data.name === 'multi_edit_files') {
+                            todoPaths = (data.args.files || []).map(function(f) { return f.path; }).filter(Boolean);
+                        } else if (data.args.path) {
+                            todoPaths = [data.args.path];
+                        }
+                        for (var tp = 0; tp < todoPaths.length; tp++) {
+                            if (todoPaths[tp] && !fileTodosMap[todoPaths[tp]]) {
+                                fileTodosMap[todoPaths[tp]] = 'pending';
+                            }
+                        }
+                        if (todoPaths.length > 0) updateTodosCard();
+                    }
                     break;
                 }
                 case 'toolResult': {
@@ -4149,6 +4407,26 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         afLlm.appendChild(llmStep);
                         var msgsLlm = document.getElementById('chatMessages');
                         msgsLlm.scrollTop = msgsLlm.scrollHeight;
+                    }
+                    break;
+                }
+                case 'fileChange': {
+                    // Mark the corresponding todo as done and update files-changed section
+                    if (data.relPath) {
+                        fileTodosMap[data.relPath] = 'done';
+                        fileChangesMap[data.relPath] = { added: data.added || 0, removed: data.removed || 0 };
+                        updateTodosCard();
+                    }
+                    break;
+                }
+                case 'undoComplete': {
+                    fileTodosMap = {};
+                    fileChangesMap = {};
+                    if (todosCard) {
+                        var tcFileSec = document.getElementById('tc-files-sec');
+                        if (tcFileSec) tcFileSec.innerHTML = '<div class="tc-msg">↩ Changes reverted</div>';
+                        var tcTodoSec = document.getElementById('tc-todos-sec');
+                        if (tcTodoSec) tcTodoSec.remove();
                     }
                     break;
                 }

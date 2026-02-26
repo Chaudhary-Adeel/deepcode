@@ -63,6 +63,8 @@ export interface AgentLoopOptions {
     onToolResult?: (toolName: string, result: ToolCallResult) => void;
     /** Called with the LLM's inline reasoning text when it precedes a tool call */
     onLLMReason?: (reasoning: string) => void;
+    /** Called when a file is successfully written/edited, carrying diff stats for the UI */
+    onFileChanged?: (file: { relPath: string; originalContent: string; added: number; removed: number }) => void;
     checkCancelled?: () => boolean;
     /** Stream tokens for the final response in real-time */
     onToken?: (token: string) => void;
@@ -352,6 +354,13 @@ export class AgentLoop {
                             );
                             this.opts.onToolResult?.(tc.function.name, result);
 
+                            // Emit per-file change events for the todos/files-changed panel
+                            if (result.changedFiles) {
+                                for (const cf of result.changedFiles) {
+                                    this.opts.onFileChanged?.(cf);
+                                }
+                            }
+
                             this.toolCallLog.push({
                                 name: tc.function.name,
                                 args,
@@ -555,6 +564,7 @@ export class AgentLoop {
             onToolCall: this.opts.onToolCall,
             onToolResult: this.opts.onToolResult,
             onLLMReason: this.opts.onLLMReason,
+            onFileChanged: this.opts.onFileChanged,
             checkCancelled: this.opts.checkCancelled,
         });
 
