@@ -12,6 +12,7 @@ import {
     AGENT_TOOLS,
     SUBAGENT_TOOLS,
 } from './tools';
+import { EditResult } from './fileEditorService';
 import { ContextManager } from './contextManager';
 import { MemoryService } from './memoryService';
 
@@ -49,6 +50,8 @@ export interface OrchestratedResponse {
     agentResults: AgentResult[];
     totalTokens: number;
     agentsUsed: AgentRole[];
+    /** Pre-parsed edit result — when present, callers can skip parseEditResponse entirely. */
+    editResult?: EditResult;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -265,19 +268,19 @@ export class SubAgentService {
                     ? this.truncate(result.content, 500)
                     : `Applied edits to ${relativePath || fileName}`;
 
-                // Use a single unified diff edit: original → final.
-                // This avoids the problem of interdependent sequential edits
-                // where edit N's oldText refers to the file after edit N-1.
-                const jsonResponse = JSON.stringify({
+                // Build EditResult directly — no JSON serialization round-trip.
+                // This avoids broken JSON when file content contains special chars.
+                const editResult: EditResult = {
                     edits: [{ oldText: fileContent, newText: finalContent }],
                     explanation,
-                });
+                };
 
                 return {
-                    content: jsonResponse,
+                    content: explanation,
+                    editResult,
                     agentResults: [{
                         role: 'logic' as AgentRole,
-                        content: jsonResponse,
+                        content: explanation,
                         tokens: result.totalTokens,
                     }],
                     totalTokens: result.totalTokens,

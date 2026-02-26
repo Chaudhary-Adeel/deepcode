@@ -186,8 +186,11 @@ export class DeepSeekService {
     ): Promise<ChatResponse> {
         const cfg = this.getConfig();
 
-        const editSystemPrompt = `You are DeepCode, an expert code editing assistant. You will be given a file and an edit instruction. 
-You MUST respond ONLY with a JSON object in this exact format (no markdown, no explanation outside JSON):
+        const editSystemPrompt = `You are DeepCode, an expert code editing assistant. You will be given a file and an edit instruction.
+
+CRITICAL: Your response MUST be a single valid JSON object and NOTHING else. No markdown, no code fences, no explanation outside the JSON, no plain text, no shell commands. Output ONLY raw JSON.
+
+Required JSON format:
 {
   "edits": [
     {
@@ -199,10 +202,13 @@ You MUST respond ONLY with a JSON object in this exact format (no markdown, no e
 }
 
 Rules:
-- oldText must be an EXACT substring of the original file
+- Your entire response must be parseable by JSON.parse() with no preprocessing
+- oldText must be an EXACT substring of the original file (character-for-character match)
 - Each edit should be minimal and precise
 - Multiple edits are allowed for complex changes
-- Keep the explanation concise`;
+- Keep the explanation concise
+- Do NOT wrap the JSON in markdown code blocks or backticks
+- Do NOT include any text before or after the JSON object`;
 
         let userMsg = `File: ${fileName}\n\n`;
         if (selectedText) {
@@ -224,6 +230,7 @@ Rules:
             top_p: cfg.topP,
             frequency_penalty: cfg.frequencyPenalty,
             presence_penalty: cfg.presencePenalty,
+            response_format: { type: 'json_object' },
             stream: false,
         });
 

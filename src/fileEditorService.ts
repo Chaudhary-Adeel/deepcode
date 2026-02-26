@@ -34,46 +34,129 @@ export class FileEditorService {
             }
         }
 
-        try {
-            const parsed = JSON.parse(jsonStr);
-            if (!parsed.edits || !Array.isArray(parsed.edits)) {
-                throw new Error('Response missing "edits" array');
-            }
-            return {
-                edits: parsed.edits.map((e: any) => ({
-                    oldText: String(e.oldText || ''),
-                    newText: String(e.newText || ''),
-                })),
-                explanation: String(parsed.explanation || 'No explanation provided'),
-            };
-        } catch (firstError) {
-            // Strategy 3: Try to fix common JSON issues (trailing commas, unescaped newlines)
+        // Helper: attempt to parse and validate the expected edit JSON structure
+        const tryParseEdits = (str: string): EditResult | null => {
             try {
-                const cleaned = jsonStr
-                    .replace(/,\s*}/g, '}')     // trailing comma before }
-                    .replace(/,\s*]/g, ']')     // trailing comma before ]
-                    .replace(/\n/g, '\\n')       // unescaped newlines in strings
-                    .replace(/\t/g, '\\t');       // unescaped tabs
-                
-                // Re-extract JSON object boundaries after cleaning
-                const start = cleaned.indexOf('{');
-                const end = cleaned.lastIndexOf('}');
-                if (start !== -1 && end > start) {
-                    const parsed = JSON.parse(cleaned.substring(start, end + 1));
-                    if (parsed.edits && Array.isArray(parsed.edits)) {
-                        return {
-                            edits: parsed.edits.map((e: any) => ({
-                                oldText: String(e.oldText || ''),
-                                newText: String(e.newText || ''),
-                            })),
-                            explanation: String(parsed.explanation || 'No explanation provided'),
-                        };
-                    }
+                const parsed = JSON.parse(str);
+                if (parsed.edits && Array.isArray(parsed.edits)) {
+                    return {
+                        edits: parsed.edits.map((e: any) => ({
+                            oldText: String(e.oldText || ''),
+                            newText: String(e.newText || ''),
+                        })),
+                        explanation: String(parsed.explanation || 'No explanation provided'),
+                    };
                 }
-            } catch { /* cleaning didn't help */ }
+            } catch { /* not valid */ }
+            return null;
+        };
 
-            throw new Error(`Failed to parse edit response: ${firstError}. Raw: ${response.substring(0, 200)}`);
+        // Strategy 2b: Direct parse
+        const direct = tryParseEdits(jsonStr);
+        if (direct) { return direct; }
+
+        // Strategy 3: Repair JSON with unescaped newlines/tabs inside string values.
+        // Walk character-by-character so we only escape control chars INSIDE
+        // quoted strings, leaving the structural JSON whitespace intact.
+        try {
+            const repaired = this.repairJsonStrings(jsonStr);
+            const start = repaired.indexOf('{');
+            const end = repaired.lastIndexOf('}');
+            if (start !== -1 && end > start) {
+                const candidate = repaired.substring(start, end + 1);
+                const parsed = tryParseEdits(candidate);
+                if (parsed) { return parsed; }
+            }
+        } catch { /* repair didn't help */ }
+
+        // Strategy 4: Fix trailing commas then retry repair
+        try {
+            const cleaned = jsonStr
+                .replace(/,\s*}/g, '}')
+                .replace(/,\s*]/g, ']');
+            const repaired = this.repairJsonStrings(cleaned);
+            const start = repaired.indexOf('{');
+            const end = repaired.lastIndexOf('}');
+            if (start !== -1 && end > start) {
+                const parsed = tryParseEdits(repaired.substring(start, end + 1));
+                if (parsed) { return parsed; }
+            }
+        } catch { /* still didn't help */ }
+
+        // Strategy 5: Regex extraction — pull oldText/newText values directly
+        try {
+            const edits: FileEdit[] = [];
+            // Match "oldText" : "..." , "newText" : "..." allowing for escaped quotes
+            const editPattern = /"oldText"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"newText"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+            let m;
+            while ((m = editPattern.exec(jsonStr)) !== null) {
+                edits.push({
+                    oldText: m[1].replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\"/g, '"').replace(/\\\\/g, '\\'),
+                    newText: m[2].replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\"/g, '"').replace(/\\\\/g, '\\'),
+                });
+            }
+            if (edits.length > 0) {
+                const explMatch = jsonStr.match(/"explanation"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+                return {
+                    edits,
+                    explanation: explMatch
+                        ? explMatch[1].replace(/\\n/g, '\n').replace(/\\"/g, '"')
+                        : 'No explanation provided',
+                };
+            }
+        } catch { /* regex extraction failed */ }
+
+        throw new Error(`Failed to parse edit response: not valid JSON. Raw: ${response.substring(0, 200)}`);
+    }
+
+    /**
+     * Repair a JSON string by escaping control characters (newlines, tabs, etc.)
+     * that appear inside quoted string values, while leaving structural
+     * JSON whitespace intact.
+     */
+    private repairJsonStrings(input: string): string {
+        const out: string[] = [];
+        let inString = false;
+        let escaped = false;
+
+        for (let i = 0; i < input.length; i++) {
+            const ch = input[i];
+
+            if (escaped) {
+                out.push(ch);
+                escaped = false;
+                continue;
+            }
+
+            if (ch === '\\' && inString) {
+                escaped = true;
+                out.push(ch);
+                continue;
+            }
+
+            if (ch === '"') {
+                inString = !inString;
+                out.push(ch);
+                continue;
+            }
+
+            if (inString) {
+                // Escape control characters that break JSON string values
+                if (ch === '\n') { out.push('\\n'); continue; }
+                if (ch === '\r') { out.push('\\r'); continue; }
+                if (ch === '\t') { out.push('\\t'); continue; }
+                // Escape other control characters (U+0000–U+001F)
+                const code = ch.charCodeAt(0);
+                if (code < 0x20) {
+                    out.push('\\u' + code.toString(16).padStart(4, '0'));
+                    continue;
+                }
+            }
+
+            out.push(ch);
         }
+
+        return out.join('');
     }
 
     /**

@@ -786,7 +786,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 () => this._isCancelled,
             );
 
-            const editResult = this._fileEditorService.parseEditResponse(result.content);
+            const editResult = result.editResult || this._fileEditorService.parseEditResponse(result.content);
 
             // Store pending edit for approval
             this._pendingEdit = {
@@ -2969,7 +2969,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
 
         function escapeHtml(str) {
-            return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;');
+            return str.replace(/&/g, '&amp;').replace(/\x3c/g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;');
         }
 
         function addMessage(role, content) {
@@ -2994,7 +2994,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         function formatContent(text) {
             if (!text) return '';
             // Escape HTML first
-            let s = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            let s = text.replace(/&/g, '&amp;').replace(/\x3c/g, '&lt;').replace(/>/g, '&gt;');
             // Code blocks (fenced) — with syntax highlighting
             s = s.replace(/\`\`\`(\\w*)?\\n?([\\s\\S]*?)\`\`\`/g, function(m, lang, code) {
                 const langLabel = lang ? '<span class="code-lang-label">' + lang + '</span>' : '';
@@ -3036,7 +3036,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             // Each rule: [regex, tokenClass]
             // Order matters — first match wins per position
 
-            var commentLine = [/\/\/[^\\n]*/g, 'tok-comment'];
+            var commentLine = [/\\/\\/[^\\n]*/g, 'tok-comment'];
             var commentBlock = [/\\/\\*[\\s\\S]*?\\*\\//g, 'tok-comment'];
             var commentHash = [/#[^\\n]*/g, 'tok-comment'];
             var commentDash = [/--[^\\n]*/g, 'tok-comment'];
