@@ -85,7 +85,6 @@ Contributions are welcome. Here's how to get started:
 
 ### Areas where help is needed
 
-- Multi-file edit support (editing across multiple files in one instruction)
 - Unit tests
 - Support for additional LLM providers (OpenAI, Anthropic, Ollama)
 

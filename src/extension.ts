@@ -121,7 +121,7 @@ export function activate(context: vscode.ExtensionContext) {
                             },
                         );
 
-                        const editResult = fileEditorService.parseEditResponse(result.content);
+                        const editResult = result.editResult || fileEditorService.parseEditResponse(result.content);
 
                         const action = await vscode.window.showInformationMessage(
                             `DeepCode [${result.agentsUsed.join(', ')}]: ${editResult.explanation}`,
@@ -239,7 +239,7 @@ export function activate(context: vscode.ExtensionContext) {
                             },
                         );
 
-                        const editResult = fileEditorService.parseEditResponse(result.content);
+                        const editResult = result.editResult || fileEditorService.parseEditResponse(result.content);
 
                         const action = await vscode.window.showInformationMessage(
                             `DeepCode Refactor [${result.agentsUsed.join(', ')}]: ${editResult.explanation}`,
