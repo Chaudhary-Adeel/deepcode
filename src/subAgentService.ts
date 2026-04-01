@@ -19,6 +19,8 @@ import { IntentAgent, IntentResult } from './agents/intentAgent';
 import { PlannerAgent, PlanResult } from './agents/plannerAgent';
 import { ReferenceMiner } from './agents/referenceMiner';
 import { Verifier, VerifyResult } from './agents/verifier';
+import { loadTranscript } from './sessionStorage';
+import { QueryEngine, QueryEngineOptions } from './queryEngine';
 
 /**
  * Sub-Agent Service for DeepCode — v3 (Agentic Tool-Use Architecture)
@@ -72,6 +74,34 @@ const DEFAULT_MAX_TOKENS = 4096;
 
 export class SubAgentService {
 
+    /** Session → QueryEngine map for multi-turn session management */
+    private engines: Map<string, QueryEngine> = new Map();
+
+    /**
+     * Get or create a QueryEngine for the given session.
+     */
+    private getOrCreateEngine(
+        sessionId: string,
+        apiKey: string,
+        model: string,
+        systemPrompt: string,
+        opts?: Partial<QueryEngineOptions>,
+    ): QueryEngine {
+        let engine = this.engines.get(sessionId);
+        if (!engine) {
+            engine = new QueryEngine({
+                apiKey,
+                model,
+                sessionId,
+                systemPrompt,
+                maxIterations: MAX_ITERATIONS,
+                ...opts,
+            });
+            this.engines.set(sessionId, engine);
+        }
+        return engine;
+    }
+
     /**
      * Handle a chat message using the full agentic tool-use loop.
      * The agent can read files, search the codebase, run commands, and
@@ -88,11 +118,11 @@ export class SubAgentService {
         topP: number,
         onStatus?: (status: string) => void,
         checkCancelled?: () => boolean,
+        sessionId?: string,
     ): Promise<OrchestratedResponse> {
         onStatus?.('Building workspace context...');
         if (checkCancelled?.()) { throw new Error('Cancelled'); }
 
-        const toolExecutor = new ToolExecutor();
         const contextManager = new ContextManager();
         const memoryService = new MemoryService();
 
@@ -117,6 +147,17 @@ export class SubAgentService {
 
         onStatus?.('Starting agent...');
 
+        // Use QueryEngine when a sessionId is provided for multi-turn
+        if (sessionId) {
+            const engine = this.getOrCreateEngine(sessionId, apiKey, model, systemPrompt, {
+                onProgress: onStatus,
+            });
+            const result = await engine.submitMessage(fullUserMessage);
+            return this.mapToOrchestratedResponse(result);
+        }
+
+        // Fallback: direct AgentLoop for sessionless calls (backward compat)
+        const toolExecutor = new ToolExecutor();
         const agentLoop = new AgentLoop({
             apiKey,
             model,
@@ -133,6 +174,47 @@ export class SubAgentService {
 
         const result = await agentLoop.run(fullUserMessage);
 
+        return this.mapToOrchestratedResponse(result);
+    }
+
+    /**
+     * Resume a previously saved session.
+     * Uses QueryEngine's loadSession() to restore conversation history,
+     * then submits a continuation prompt.
+     */
+    async resumeChat(
+        sessionId: string,
+        apiKey: string,
+        model: string,
+        temperature: number,
+        topP: number,
+        onStatus?: (status: string) => void,
+        checkCancelled?: () => boolean,
+    ): Promise<OrchestratedResponse> {
+        onStatus?.('Resuming previous session...');
+
+        const contextManager = new ContextManager();
+        const workspaceContext = await contextManager.buildWorkspaceContext();
+        const systemPrompt = AGENT_SYSTEM_PROMPT.replace(
+            '{WORKSPACE_CONTEXT}',
+            workspaceContext
+        );
+
+        const engine = this.getOrCreateEngine(sessionId, apiKey, model, systemPrompt, {
+            onProgress: onStatus,
+        });
+
+        const loaded = await engine.loadSession(sessionId);
+        if (!loaded) {
+            return {
+                content: `Session "${sessionId}" not found.`,
+                agentResults: [],
+                totalTokens: 0,
+                agentsUsed: [],
+            };
+        }
+
+        const result = await engine.submitMessage('Continue where we left off.');
         return this.mapToOrchestratedResponse(result);
     }
 
@@ -166,11 +248,11 @@ export class SubAgentService {
         onToolResult?: (toolName: string, result: ToolCallResult) => void,
         onLLMReason?: (reasoning: string) => void,
         onFileChanged?: (file: { relPath: string; originalContent: string; added: number; removed: number }) => void,
+        sessionId?: string,
     ): Promise<OrchestratedResponse> {
         onStatus?.('Building workspace context...');
         if (checkCancelled?.()) { throw new Error('Cancelled'); }
 
-        const toolExecutor = new ToolExecutor();
         const contextManager = new ContextManager();
 
         const workspaceContext = await contextManager.buildWorkspaceContext();
@@ -189,25 +271,40 @@ export class SubAgentService {
 
         onStatus?.('Analyzing code and planning edits...');
 
-        const agentLoop = new AgentLoop({
-            apiKey,
-            model,
-            systemPrompt,
-            temperature: Math.min(temperature, 0.1), // Keep edits deterministic
-            topP,
-            maxTokens: DEFAULT_MAX_TOKENS,
-            maxIterations: MAX_ITERATIONS,
-            tools: AGENT_TOOLS,
-            toolExecutor,
-            onProgress: onStatus,
-            onToolCall,
-            onToolResult,
-            onLLMReason,
-            onFileChanged,
-            checkCancelled,
-        });
+        let result: AgentLoopResult;
 
-        const result = await agentLoop.run(userMessage);
+        if (sessionId) {
+            // Use QueryEngine for session-managed edits
+            const engine = this.getOrCreateEngine(sessionId, apiKey, model, systemPrompt, {
+                onProgress: onStatus,
+                onToolCall,
+                onToolResult,
+                onLLMReason,
+                onFileChanged,
+            });
+            result = await engine.submitMessage(userMessage);
+        } else {
+            // Direct AgentLoop for sessionless calls (backward compat)
+            const toolExecutor = new ToolExecutor();
+            const agentLoop = new AgentLoop({
+                apiKey,
+                model,
+                systemPrompt,
+                temperature: Math.min(temperature, 0.1),
+                topP,
+                maxTokens: DEFAULT_MAX_TOKENS,
+                maxIterations: MAX_ITERATIONS,
+                tools: AGENT_TOOLS,
+                toolExecutor,
+                onProgress: onStatus,
+                onToolCall,
+                onToolResult,
+                onLLMReason,
+                onFileChanged,
+                checkCancelled,
+            });
+            result = await agentLoop.run(userMessage);
+        }
 
         // ── Post-loop: extract edits and revert file for approval workflow ──
 
