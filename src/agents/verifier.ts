@@ -7,6 +7,7 @@
 
 import * as vscode from 'vscode';
 import * as https from 'https';
+import { ApiClient, createApiClient } from '../apiClient';
 import { exec } from 'child_process';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -19,7 +20,6 @@ export interface VerifyResult {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const DEEPSEEK_API_BASE = 'api.deepseek.com';
 const MAX_RETRIES = 3;
 const EXEC_TIMEOUT_MS = 60_000;
 
@@ -38,10 +38,12 @@ Output valid JSON only.`;
 export class Verifier {
     private readonly apiKey: string;
     private readonly model: string;
+    private readonly apiClient: ApiClient;
 
     constructor(apiKey: string, model: string) {
         this.apiKey = apiKey;
         this.model = model;
+        this.apiClient = createApiClient({ apiKey, model });
     }
 
     /**
@@ -232,65 +234,18 @@ export class Verifier {
 
     // ─── DeepSeek API Call ───────────────────────────────────────────────
 
-    private callAPI(userContent: string): Promise<string> {
-        return new Promise((resolve, reject) => {
-            const body = JSON.stringify({
-                model: this.model,
-                messages: [
-                    { role: 'system', content: FIX_SYSTEM_PROMPT },
-                    { role: 'user', content: userContent },
-                ],
-                temperature: 0,
-                response_format: { type: 'json_object' },
-            });
-
-            const reqOpts: https.RequestOptions = {
-                hostname: DEEPSEEK_API_BASE,
-                port: 443,
-                path: '/chat/completions',
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    Authorization: `Bearer ${this.apiKey}`,
-                    'Content-Length': Buffer.byteLength(body),
-                },
-            };
-
-            const req = https.request(reqOpts, (res) => {
-                let data = '';
-                res.on('data', (chunk) => {
-                    data += chunk;
-                });
-                res.on('end', () => {
-                    try {
-                        if (res.statusCode !== 200) {
-                            let errMsg = `Verifier API error: ${res.statusCode}`;
-                            try {
-                                const err = JSON.parse(data);
-                                errMsg = err.error?.message || errMsg;
-                            } catch { /* use default */ }
-                            reject(new Error(errMsg));
-                            return;
-                        }
-
-                        const json = JSON.parse(data);
-                        const content = json.choices?.[0]?.message?.content;
-                        if (!content) {
-                            reject(new Error('Verifier: no content in API response'));
-                            return;
-                        }
-                        resolve(content);
-                    } catch (e) {
-                        reject(new Error(`Verifier: failed to parse API response: ${e}`));
-                    }
-                });
-            });
-
-            req.on('error', (e) =>
-                reject(new Error(`Verifier network error: ${e.message}`))
-            );
-            req.write(body);
-            req.end();
+    private async callAPI(userContent: string): Promise<string> {
+        const result = await this.apiClient.chatCompletion({
+            messages: [
+                { role: 'system', content: FIX_SYSTEM_PROMPT },
+                { role: 'user', content: userContent },
+            ],
+            temperature: 0,
+            responseFormat: { type: 'json_object' },
         });
+        if (!result.content) {
+            throw new Error('Verifier: no content in API response');
+        }
+        return result.content;
     }
 }

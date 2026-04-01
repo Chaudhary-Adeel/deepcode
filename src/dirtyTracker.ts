@@ -58,6 +58,7 @@ const INDEXABLE_EXTENSIONS = new Set([
 export class DirtyTracker implements vscode.Disposable {
 
     private readonly dirtySet = new Set<string>();
+    private readonly revisionMap = new Map<string, number>();
     private indexMeta: IndexMetaFile = { version: 1, entries: {} };
     private readonly workspaceRoot: string;
     private readonly disposables: vscode.Disposable[] = [];
@@ -93,12 +94,20 @@ export class DirtyTracker implements vscode.Disposable {
      * Mark a file as clean (called by IndexEngine after successful indexing).
      * Updates the lastIndexed timestamp and schedules a debounced persist.
      */
-    markClean(filepath: string): void {
+    markClean(filepath: string, expectedRevision?: number): boolean {
         const rel = this.normalize(filepath);
-        this.dirtySet.delete(rel);
+        const currentRevision = this.revisionMap.get(rel) || 0;
+        if (expectedRevision !== undefined && currentRevision !== expectedRevision) {
+            return false;
+        }
+
+        const wasDirty = this.dirtySet.delete(rel);
         this.indexMeta.entries[rel] = { lastIndexed: Date.now() };
-        this._onDidChange.fire({ filepath: rel, dirty: false });
+        if (wasDirty) {
+            this._onDidChange.fire({ filepath: rel, dirty: false });
+        }
         this.scheduleSave();
+        return true;
     }
 
     /**
@@ -121,6 +130,11 @@ export class DirtyTracker implements vscode.Disposable {
     /** Get count of dirty files */
     getDirtyCount(): number {
         return this.dirtySet.size;
+    }
+
+    /** Get the current content revision for a file. Increments on each FS change/create event. */
+    getRevision(filepath: string): number {
+        return this.revisionMap.get(this.normalize(filepath)) || 0;
     }
 
     /** Stop watching and clean up */
@@ -238,6 +252,7 @@ export class DirtyTracker implements vscode.Disposable {
         const rel = this.toRelative(uri);
         if (this.isIgnored(rel)) { return; }
         if (!this.isIndexableExtension(rel)) { return; } // Only track indexable files
+        this.bumpRevision(rel);
         if (this.dirtySet.has(rel)) { return; } // already dirty — no-op
 
         this.dirtySet.add(rel);
@@ -248,6 +263,7 @@ export class DirtyTracker implements vscode.Disposable {
         const rel = this.toRelative(uri);
         this.dirtySet.delete(rel);
         delete this.indexMeta.entries[rel];
+        this.revisionMap.delete(rel);
         this.scheduleSave();
     }
 
@@ -276,5 +292,12 @@ export class DirtyTracker implements vscode.Disposable {
     private isIndexableExtension(filepath: string): boolean {
         const ext = filepath.substring(filepath.lastIndexOf('.')).toLowerCase();
         return INDEXABLE_EXTENSIONS.has(ext);
+    }
+
+    private bumpRevision(filepath: string): number {
+        const rel = this.normalize(filepath);
+        const next = (this.revisionMap.get(rel) || 0) + 1;
+        this.revisionMap.set(rel, next);
+        return next;
     }
 }

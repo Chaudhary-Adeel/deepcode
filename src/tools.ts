@@ -36,6 +36,7 @@ export interface ToolDefinition {
             required?: string[];
         };
     };
+    maxResultChars?: number;
 }
 
 export interface ToolCallResult {
@@ -48,6 +49,54 @@ export interface ToolCallResult {
         added: number;
         removed: number;
     }>;
+}
+
+// ─── Modern Tool Interface ───────────────────────────────────────────────────
+
+export interface ToolContext {
+    workspaceRoot: string;
+    cancellationToken?: { isCancelled: boolean };
+    onProgress?: (message: string) => void;
+    onFileChanged?: (file: { relPath: string; originalContent: string; added: number; removed: number }) => void;
+}
+
+export interface Tool<TInput = Record<string, any>> {
+    name: string;
+    description: string;
+    parameters: {
+        type: string;
+        properties: Record<string, any>;
+        required?: string[];
+    };
+    maxResultChars: number;
+    isReadOnly: boolean;
+    isConcurrencySafe: boolean;
+    validateInput?(input: TInput): { valid: boolean; error?: string };
+    call(input: TInput, context: ToolContext): Promise<ToolCallResult>;
+}
+
+export function buildTool<TInput = Record<string, any>>(
+    def: Partial<Tool<TInput>> & Pick<Tool<TInput>, 'name' | 'call' | 'parameters' | 'description'>
+): Tool<TInput> {
+    return {
+        maxResultChars: 8_000,
+        isReadOnly: false,
+        isConcurrencySafe: false,
+        ...def,
+    };
+}
+
+/** Convert a Tool to the ToolDefinition format expected by the API */
+export function toolToDefinition(tool: Tool): ToolDefinition {
+    return {
+        type: 'function',
+        function: {
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.parameters,
+        },
+        maxResultChars: tool.maxResultChars,
+    };
 }
 
 // ─── Tool Definitions ────────────────────────────────────────────────────────
@@ -80,6 +129,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
                 required: ['path'],
             },
         },
+        maxResultChars: 50_000,
     },
     {
         type: 'function',
@@ -219,6 +269,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
                 required: [],
             },
         },
+        maxResultChars: 10_000,
     },
     {
         type: 'function',
@@ -242,6 +293,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
                 required: ['pattern'],
             },
         },
+        maxResultChars: 10_000,
     },
     {
         type: 'function',
@@ -275,6 +327,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
                 required: ['query'],
             },
         },
+        maxResultChars: 20_000,
     },
     {
         type: 'function',
@@ -299,6 +352,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
                 required: ['command'],
             },
         },
+        maxResultChars: 30_000,
     },
     {
         type: 'function',
@@ -319,6 +373,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
                 required: [],
             },
         },
+        maxResultChars: 10_000,
     },
     {
         type: 'function',
@@ -344,6 +399,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
                 required: ['query'],
             },
         },
+        maxResultChars: 15_000,
     },
     {
         type: 'function',
@@ -369,6 +425,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
                 required: ['url'],
             },
         },
+        maxResultChars: 15_000,
     },
     {
         type: 'function',
@@ -376,23 +433,45 @@ export const AGENT_TOOLS: ToolDefinition[] = [
             name: 'run_subagent',
             description:
                 'Spawn a sub-agent to perform a focused task autonomously. ' +
-                'The sub-agent has access to all workspace tools (read, write, edit, search, etc.) ' +
-                'and will work independently until done. ' +
-                'Use this when you need to investigate or implement multiple independent tasks in parallel. ' +
-                'Multiple run_subagent calls in the SAME response execute simultaneously.',
+                'The sub-agent has access to workspace tools and will work independently until done. ' +
+                'Use for parallel independent tasks. Multiple run_subagent calls in the SAME response execute simultaneously.\n\n' +
+                'Modes:\n' +
+                '- fresh (default): Sub-agent starts with zero context, only the task description.\n' +
+                '- fork: Sub-agent inherits the parent conversation history, so it can see what you already discovered.\n\n' +
+                'Set background=true to start the agent and continue working without waiting for its result.',
             parameters: {
                 type: 'object',
                 properties: {
                     task: {
                         type: 'string',
-                        description:
-                            'Detailed description of the focused task for the sub-agent. ' +
-                            'Be specific about what to investigate, change, or produce.',
+                        description: 'Detailed description of the focused task for the sub-agent.',
                     },
                     context: {
                         type: 'string',
-                        description:
-                            'Any relevant context: file contents, error messages, requirements, etc.',
+                        description: 'Any relevant context: file contents, error messages, requirements, etc.',
+                    },
+                    mode: {
+                        type: 'string',
+                        enum: ['fresh', 'fork'],
+                        description: 'fresh = zero context (default), fork = inherit parent conversation history.',
+                    },
+                    background: {
+                        type: 'boolean',
+                        description: 'If true, return immediately and notify when the sub-agent completes.',
+                    },
+                    name: {
+                        type: 'string',
+                        description: 'Short identifier for this sub-agent (used in UI and notifications).',
+                    },
+                    tools: {
+                        type: 'array',
+                        items: { type: 'string' },
+                        description: 'Restrict the sub-agent to these named tools. Default: all agent tools minus run_subagent.',
+                    },
+                    subagent_type: {
+                        type: 'string',
+                        enum: ['explore', 'implementer', 'reviewer'],
+                        description: 'Use a predefined agent definition with specific system prompt and tool restrictions.',
                     },
                 },
                 required: ['task'],
@@ -548,6 +627,121 @@ export const SUBAGENT_TOOLS: ToolDefinition[] = AGENT_TOOLS.filter(
     (t) => t.function.name !== 'run_subagent'
 );
 
+const DEFAULT_MAX_RESULT_CHARS = 8_000;
+
+export function getToolOutputBudget(toolName: string, tools: ToolDefinition[]): number {
+    const tool = tools.find(t => t.function.name === toolName);
+    return tool?.maxResultChars ?? DEFAULT_MAX_RESULT_CHARS;
+}
+
+// ─── Input Validators ────────────────────────────────────────────────────────
+
+function createValidator(toolName: string): ((input: Record<string, any>) => { valid: boolean; error?: string }) | undefined {
+    switch (toolName) {
+        case 'read_file':
+            return (input) => {
+                if (!input.path || typeof input.path !== 'string' || input.path.trim() === '') {
+                    return { valid: false, error: 'path is required and must be a non-empty string' };
+                }
+                if (input.path.includes('..')) {
+                    return { valid: false, error: 'path must not contain ".." (no escaping workspace)' };
+                }
+                return { valid: true };
+            };
+        case 'write_file':
+            return (input) => {
+                if (!input.path || typeof input.path !== 'string' || input.path.trim() === '') {
+                    return { valid: false, error: 'path is required and must be a non-empty string' };
+                }
+                if (input.content === undefined || input.content === null) {
+                    return { valid: false, error: 'content is required' };
+                }
+                return { valid: true };
+            };
+        case 'edit_file':
+            return (input) => {
+                if (!input.path || typeof input.path !== 'string' || input.path.trim() === '') {
+                    return { valid: false, error: 'path is required and must be a non-empty string' };
+                }
+                if (!Array.isArray(input.edits) || input.edits.length === 0) {
+                    return { valid: false, error: 'edits array is required and must be non-empty' };
+                }
+                for (let i = 0; i < input.edits.length; i++) {
+                    const edit = input.edits[i];
+                    if (typeof edit.oldText !== 'string' || typeof edit.newText !== 'string') {
+                        return { valid: false, error: `edit[${i}] must have oldText and newText strings` };
+                    }
+                }
+                return { valid: true };
+            };
+        case 'run_command':
+            return (input) => {
+                if (!input.command || typeof input.command !== 'string' || input.command.trim() === '') {
+                    return { valid: false, error: 'command is required and must be a non-empty string' };
+                }
+                const blocklist = ['rm -rf /', 'mkfs', 'dd if=', ':(){', 'fork bomb'];
+                for (const blocked of blocklist) {
+                    if (input.command.includes(blocked)) {
+                        return { valid: false, error: `command contains blocked pattern: "${blocked}"` };
+                    }
+                }
+                return { valid: true };
+            };
+        default:
+            return undefined;
+    }
+}
+
+// ─── Tool Registry ───────────────────────────────────────────────────────────
+
+export const TOOL_REGISTRY: Map<string, Tool> = new Map();
+
+function registerTools(): void {
+    // Read-only, concurrency-safe tools
+    const readOnlyTools = [
+        'read_file', 'list_directory', 'search_files', 'grep_search',
+        'get_diagnostics', 'search_symbol', 'find_references',
+        'get_file_skeleton', 'semantic_search',
+    ];
+
+    // Write tools — NOT concurrency-safe
+    const writeTools = [
+        'write_file', 'edit_file', 'multi_edit_files', 'run_command',
+    ];
+
+    for (const toolDef of AGENT_TOOLS) {
+        const name = toolDef.function.name;
+        const isReadOnly = readOnlyTools.includes(name);
+        const isConcurrencySafe = readOnlyTools.includes(name);
+
+        const tool = buildTool({
+            name,
+            description: toolDef.function.description,
+            parameters: toolDef.function.parameters,
+            maxResultChars: toolDef.maxResultChars ?? 8_000,
+            isReadOnly,
+            isConcurrencySafe,
+            validateInput: createValidator(name),
+            call: async () => ({ success: false, output: 'Use ToolExecutor.execute() for now' }),
+        });
+
+        TOOL_REGISTRY.set(name, tool);
+    }
+}
+
+// Initialize tool registry
+registerTools();
+
+/** Check if a tool is safe to run concurrently */
+export function isToolConcurrencySafe(toolName: string): boolean {
+    return TOOL_REGISTRY.get(toolName)?.isConcurrencySafe ?? false;
+}
+
+/** Check if a tool is read-only */
+export function isToolReadOnly(toolName: string): boolean {
+    return TOOL_REGISTRY.get(toolName)?.isReadOnly ?? false;
+}
+
 // ─── Tool Executor ───────────────────────────────────────────────────────────
 
 export class ToolExecutor {
@@ -563,6 +757,18 @@ export class ToolExecutor {
      * All tools are sandboxed to the workspace directory.
      */
     async execute(name: string, args: Record<string, any>): Promise<ToolCallResult> {
+        // Input validation via Tool registry
+        const tool = TOOL_REGISTRY.get(name);
+        if (tool?.validateInput) {
+            const validation = tool.validateInput(args);
+            if (!validation.valid) {
+                return {
+                    success: false,
+                    output: `Input validation failed for "${name}": ${validation.error}. Please fix the arguments and try again.`,
+                };
+            }
+        }
+
         try {
             switch (name) {
                 case 'read_file':
@@ -1550,7 +1756,7 @@ export class ToolExecutor {
     private async runVerify(command?: string): Promise<ToolCallResult> {
         const verifyCmd = command
             || vscode.workspace.getConfiguration('deepcode').get<string>('verifyCommand')
-            || 'npx tsc --noEmit';
+            || await this.detectVerifyCommand();
 
         return new Promise<ToolCallResult>((resolve) => {
             const child = cp.exec(verifyCmd, {
@@ -1575,6 +1781,29 @@ export class ToolExecutor {
                 resolve({ success: false, output: `Failed to run verify command: ${err.message}` });
             });
         });
+    }
+
+    private async detectVerifyCommand(): Promise<string> {
+        try {
+            const packageJsonPath = path.join(this.workspaceRoot, 'package.json');
+            const packageJsonUri = vscode.Uri.file(packageJsonPath);
+            const packageJsonRaw = await vscode.workspace.fs.readFile(packageJsonUri);
+            const packageJson = JSON.parse(Buffer.from(packageJsonRaw).toString('utf-8')) as {
+                scripts?: Record<string, string>;
+            };
+
+            const scripts = packageJson.scripts || {};
+            const preferredScripts = ['verify', 'lint', 'test', 'build', 'compile'];
+            for (const script of preferredScripts) {
+                if (scripts[script]) {
+                    return `npm run ${script}`;
+                }
+            }
+        } catch {
+            // Fall through to the conservative TypeScript default.
+        }
+
+        return 'npx tsc --noEmit';
     }
 
     // ─── search_symbol ───────────────────────────────────────────────────

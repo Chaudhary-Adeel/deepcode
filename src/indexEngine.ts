@@ -201,6 +201,7 @@ export class IndexEngine implements vscode.Disposable {
         if (!this.parser || !this.initialized) { return undefined; }
 
         const rel = this.normalize(filepath);
+        const revisionAtStart = this.dirtyTracker.getRevision(rel);
         if (!this.isIndexable(rel)) { return undefined; }
 
         // Step 1: Not dirty + in cache → return cached
@@ -222,9 +223,10 @@ export class IndexEngine implements vscode.Disposable {
         const hash = this.hashContent(content);
         const existing = this.cache.get(rel);
         if (existing && existing.contentHash === hash) {
-            existing.lastIndexed = Date.now();
-            this.dirtyTracker.markClean(rel);
-            this.scheduleSave();
+            if (this.dirtyTracker.markClean(rel, revisionAtStart)) {
+                existing.lastIndexed = Date.now();
+                this.scheduleSave();
+            }
             return existing;
         }
 
@@ -244,12 +246,18 @@ export class IndexEngine implements vscode.Disposable {
             ...parsed,
         };
 
+        // The file changed while we were parsing it. Keep it dirty so the next
+        // request reindexes the latest content instead of clearing the change.
+        if (this.dirtyTracker.getRevision(rel) !== revisionAtStart) {
+            return existing ?? entry;
+        }
+
         // Step 6: Update cache + importers
         this.cache.set(rel, entry);
         this.updateImportersForFile(rel, parsed.imports);
 
         // Step 7: Mark clean
-        this.dirtyTracker.markClean(rel);
+        this.dirtyTracker.markClean(rel, revisionAtStart);
 
         // Step 8: Dependency propagation
         this.propagateDependencyDirtiness(rel, oldExports, parsed.exports);

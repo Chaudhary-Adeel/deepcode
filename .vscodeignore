@@ -2,7 +2,14 @@
 .vscode-test/**
 src/**
 node_modules/**
+out/__tests__/**
+assets/**
 .gitignore
+.github/**
 tsconfig.json
+jest.config.js
+eslint.config.js
+build.sh
+Technical.md
 **/*.ts
 **/*.map

@@ -6,6 +6,7 @@
  */
 
 import * as https from 'https';
+import { ApiClient, createApiClient } from '../apiClient';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -14,8 +15,6 @@ export interface MinerResult {
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
-
-const DEEPSEEK_API_BASE = 'api.deepseek.com';
 
 const SYNTHESIZER_SYSTEM_PROMPT = `You are a technical reference synthesizer. Given a task description and raw web search results about libraries/frameworks, produce a concise implementation guide containing:
 
@@ -30,10 +29,12 @@ Be precise and code-focused. Omit marketing content, installation instructions, 
 export class ReferenceMiner {
     private readonly apiKey: string;
     private readonly model: string;
+    private readonly apiClient: ApiClient;
 
     constructor(apiKey: string, model: string) {
         this.apiKey = apiKey;
         this.model = model;
+        this.apiClient = createApiClient({ apiKey, model });
     }
 
     /**
@@ -157,68 +158,17 @@ export class ReferenceMiner {
 
     // ─── Synthesis via DeepSeek ──────────────────────────────────────────
 
-    private synthesize(task: string, rawSearchResults: string): Promise<string> {
-        return new Promise((resolve, reject) => {
-            const userContent = [
-                `## Task`,
-                task,
-                '',
-                `## Raw Search Results`,
-                rawSearchResults,
-            ].join('\n');
-
-            const body = JSON.stringify({
-                model: this.model,
-                messages: [
-                    { role: 'system', content: SYNTHESIZER_SYSTEM_PROMPT },
-                    { role: 'user', content: userContent },
-                ],
-                temperature: 0,
-            });
-
-            const reqOpts: https.RequestOptions = {
-                hostname: DEEPSEEK_API_BASE,
-                port: 443,
-                path: '/chat/completions',
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    Authorization: `Bearer ${this.apiKey}`,
-                    'Content-Length': Buffer.byteLength(body),
-                },
-            };
-
-            const req = https.request(reqOpts, (res) => {
-                let data = '';
-                res.on('data', (chunk) => {
-                    data += chunk;
-                });
-                res.on('end', () => {
-                    try {
-                        if (res.statusCode !== 200) {
-                            let errMsg = `ReferenceMiner synthesis API error: ${res.statusCode}`;
-                            try {
-                                const err = JSON.parse(data);
-                                errMsg = err.error?.message || errMsg;
-                            } catch { /* use default */ }
-                            reject(new Error(errMsg));
-                            return;
-                        }
-
-                        const json = JSON.parse(data);
-                        const content = json.choices?.[0]?.message?.content;
-                        resolve(content || '');
-                    } catch (e) {
-                        reject(new Error(`ReferenceMiner: failed to parse synthesis response: ${e}`));
-                    }
-                });
-            });
-
-            req.on('error', (e) =>
-                reject(new Error(`ReferenceMiner synthesis network error: ${e.message}`))
-            );
-            req.write(body);
-            req.end();
+    private async synthesize(task: string, rawSearchResults: string): Promise<string> {
+        const userContent = [
+            `## Task`, task, '', `## Raw Search Results`, rawSearchResults,
+        ].join('\n');
+        const result = await this.apiClient.chatCompletion({
+            messages: [
+                { role: 'system', content: SYNTHESIZER_SYSTEM_PROMPT },
+                { role: 'user', content: userContent },
+            ],
+            temperature: 0,
         });
+        return result.content || '';
     }
 }

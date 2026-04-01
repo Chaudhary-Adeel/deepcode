@@ -474,26 +474,77 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     /** Human-readable label for a tool call — used in the activity-feed step text. */
     private static describeToolCall(toolName: string, args: Record<string, any>): string {
         switch (toolName) {
-            case 'read_file':        return `Reading ${args.path || 'file'}...`;
-            case 'write_file':       return `Writing ${args.path || 'file'}...`;
-            case 'edit_file':        return `Editing ${args.path || 'file'}...`;
-            case 'multi_edit_files': return `Editing ${(args.files || []).length} file(s)...`;
-            case 'list_directory':   return `Exploring ${args.path || '.'}...`;
-            case 'search_files':     return `Finding files: ${args.pattern || ''}...`;
-            case 'grep_search':      return `Searching: "${(args.query || '').substring(0, 50)}"...`;
-            case 'semantic_search':  return `Semantic search: "${(args.query || '').substring(0, 50)}"...`;
-            case 'search_symbol':    return `Looking up symbol: ${args.symbol || ''}...`;
-            case 'get_file_skeleton':return `Scanning ${args.path || 'file'}...`;
-            case 'run_command':      return `Running: ${(args.command || '').substring(0, 50)}...`;
-            case 'get_diagnostics':  return 'Checking for errors...';
-            case 'web_search':       return `Web search: "${(args.query || '').substring(0, 50)}"...`;
-            case 'fetch_webpage':    return 'Reading documentation...';
-            case 'run_subagent':     return `Sub-task: ${(args.task || '').substring(0, 60)}...`;
+            case 'read_file': {
+                const file = args.path || 'file';
+                const shortFile = file.split('/').pop() || file;
+                if (args.startLine || args.start_line) {
+                    return `Reading ${shortFile} (lines ${args.startLine || args.start_line}–${args.endLine || args.end_line || '…'})`;
+                }
+                return `Reading ${shortFile}`;
+            }
+            case 'write_file': {
+                const file = (args.path || 'file').split('/').pop();
+                return `Creating ${file}`;
+            }
+            case 'edit_file': {
+                const file = (args.path || 'file').split('/').pop();
+                const editCount = (args.edits || args.changes || []).length;
+                return editCount > 1 ? `Applying ${editCount} edits to ${file}` : `Editing ${file}`;
+            }
+            case 'multi_edit_files': {
+                const count = (args.files || []).length;
+                return `Editing ${count} files atomically`;
+            }
+            case 'list_directory': {
+                const dir = args.path || '.';
+                return dir === '.' || dir === '' ? 'Mapping project structure' : `Scanning ${dir.split('/').pop() || dir}/`;
+            }
+            case 'search_files': return `Finding files: ${args.pattern || '*'}`;
+            case 'grep_search': {
+                const q = (args.query || '').substring(0, 40);
+                return args.includePattern ? `Searching ${args.includePattern} for "${q}"` : `Searching codebase for "${q}"`;
+            }
+            case 'semantic_search': return `Semantic search: "${(args.query || '').substring(0, 40)}"`;
+            case 'search_symbol': return `Looking up \`${args.symbol || args.name || ''}\``;
+            case 'find_references': return `Tracing references to \`${args.symbol || args.symbolName || ''}\``;
+            case 'get_file_skeleton': {
+                const p = args.paths || args.path;
+                const label = Array.isArray(p) ? `${p.length} files` : (p || 'file').split('/').pop();
+                return `Scanning structure of ${label}`;
+            }
+            case 'run_command': {
+                const cmd = (args.command || '').substring(0, 45);
+                if (cmd.includes('test')) return `Running tests: ${cmd}`;
+                if (cmd.includes('build') || cmd.includes('tsc')) return `Building: ${cmd}`;
+                if (cmd.includes('lint')) return `Linting: ${cmd}`;
+                if (cmd.includes('install')) return `Installing dependencies`;
+                return `Running: ${cmd}`;
+            }
+            case 'get_diagnostics': {
+                const file = args.path || args.filePath;
+                return file ? `Checking ${file.split('/').pop()} for errors` : 'Running diagnostics';
+            }
+            case 'web_search': return `Searching web: "${(args.query || '').substring(0, 40)}"`;
+            case 'fetch_webpage': return 'Fetching documentation';
+            case 'run_subagent': {
+                const task = (args.task || '').substring(0, 50);
+                const name = args.name;
+                if (args.background) return `Launching background agent${name ? ` "${name}"` : ''}`;
+                if (args.mode === 'fork') return `Forking context for: ${task}`;
+                return `Delegating: ${task}`;
+            }
             case 'intent_agent':     return 'Classifying request...';
             case 'planner_agent':    return 'Planning approach...';
             case 'reference_miner':  return 'Searching for reference examples...';
+            case 'run_verify': {
+                const cmd = args.command || '';
+                return cmd ? `Verifying: ${cmd.substring(0, 40)}` : 'Running verification';
+            }
             case 'verifier':         return `Verifying: ${(args.command || '').substring(0, 50)}...`;
-            default:                 return `${toolName.replace(/_/g, ' ')}...`;
+            default: {
+                const readable = toolName.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                return readable;
+            }
         }
     }
 

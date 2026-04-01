@@ -98,7 +98,7 @@ export class CodeSearch implements vscode.Disposable {
      * Called whenever IndexEngine re-indexes a file.
      */
     updateFromEntry(entry: IndexEntry): void {
-        const relPath = path.relative(this.workspaceRoot, entry.filepath);
+        const relPath = this.normalizePath(entry.filepath);
 
         // Skip if the file hasn't changed since last indexing
         if (this.fileHashes.get(relPath) === entry.contentHash) {
@@ -415,6 +415,14 @@ export class CodeSearch implements vscode.Disposable {
         this.invertedIndex = newInverted;
         this.idfCache.clear();
         this.fileHashes.delete(relPath);
+    }
+
+    private normalizePath(filepath: string): string {
+        if (!filepath) { return ''; }
+        if (path.isAbsolute(filepath)) {
+            return path.relative(this.workspaceRoot, filepath).replace(/\\/g, '/');
+        }
+        return filepath.replace(/\\/g, '/').replace(/^\.\//, '');
     }
 
     // ─── Persistence ─────────────────────────────────────────────────────

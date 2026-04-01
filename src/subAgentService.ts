@@ -120,7 +120,7 @@ export class SubAgentService {
         checkCancelled?: () => boolean,
         sessionId?: string,
     ): Promise<OrchestratedResponse> {
-        onStatus?.('Building workspace context...');
+        onStatus?.('Preparing workspace context...');
         if (checkCancelled?.()) { throw new Error('Cancelled'); }
 
         const contextManager = new ContextManager();
@@ -145,7 +145,7 @@ export class SubAgentService {
             fullUserMessage = `${compressed}\n\n---\n\n${userMessage}`;
         }
 
-        onStatus?.('Starting agent...');
+        onStatus?.('Agent initialized — working on your request...');
 
         // Use QueryEngine when a sessionId is provided for multi-turn
         if (sessionId) {
@@ -191,7 +191,7 @@ export class SubAgentService {
         onStatus?: (status: string) => void,
         checkCancelled?: () => boolean,
     ): Promise<OrchestratedResponse> {
-        onStatus?.('Resuming previous session...');
+        onStatus?.('Restoring session history...');
 
         const contextManager = new ContextManager();
         const workspaceContext = await contextManager.buildWorkspaceContext();
@@ -250,7 +250,7 @@ export class SubAgentService {
         onFileChanged?: (file: { relPath: string; originalContent: string; added: number; removed: number }) => void,
         sessionId?: string,
     ): Promise<OrchestratedResponse> {
-        onStatus?.('Building workspace context...');
+        onStatus?.('Preparing workspace context...');
         if (checkCancelled?.()) { throw new Error('Cancelled'); }
 
         const contextManager = new ContextManager();
@@ -644,7 +644,7 @@ export class SubAgentService {
             onStatus?.('Previous attempts had issues — using direct approach...');
         }
 
-        onStatus?.('Working on your request...');
+        onStatus?.('Agent initialized — working on your request...');
 
         const agentLoop = new AgentLoop({
             apiKey,

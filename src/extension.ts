@@ -15,6 +15,7 @@ let statusBarItem: vscode.StatusBarItem;
 let indexEngineInstance: IndexEngine | undefined;
 let symbolGraphInstance: SymbolGraph | undefined;
 let codeSearchInstance: CodeSearch | undefined;
+let dirtyTrackerInstance: DirtyTracker | undefined;
 
 /** Get the global IndexEngine instance (undefined if no workspace) */
 export function getIndexEngine(): IndexEngine | undefined { return indexEngineInstance; }
@@ -22,6 +23,8 @@ export function getIndexEngine(): IndexEngine | undefined { return indexEngineIn
 export function getSymbolGraph(): SymbolGraph | undefined { return symbolGraphInstance; }
 /** Get the global CodeSearch instance (undefined if no workspace) */
 export function getCodeSearch(): CodeSearch | undefined { return codeSearchInstance; }
+/** Get the global DirtyTracker instance (undefined if no workspace) */
+export function getDirtyTracker(): DirtyTracker | undefined { return dirtyTrackerInstance; }
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('DeepCode extension is now active!');
@@ -43,6 +46,7 @@ export function activate(context: vscode.ExtensionContext) {
     if (workspaceRoot) {
         const dirtyTracker = new DirtyTracker(workspaceRoot);
         context.subscriptions.push(dirtyTracker);
+        dirtyTrackerInstance = dirtyTracker;
 
         const indexEngine = new IndexEngine(workspaceRoot, context.extensionPath, dirtyTracker);
         context.subscriptions.push(indexEngine);

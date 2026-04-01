@@ -56,6 +56,21 @@ export class ContextManager {
             parts.push('No workspace open.');
         }
 
+        // Dirty files give the agent a high-signal view of the current area of change.
+        try {
+            const { getDirtyTracker } = require('./extension') as typeof import('./extension');
+            const dirtyTracker = getDirtyTracker();
+            if (dirtyTracker) {
+                const dirtyFiles = dirtyTracker.getDirty();
+                parts.push(`Dirty files: ${dirtyFiles.length}`);
+                if (dirtyFiles.length > 0) {
+                    parts.push(`Recently changed: ${dirtyFiles.slice(0, 12).join(', ')}`);
+                }
+            }
+        } catch {
+            // Best effort only — context should still build without index services.
+        }
+
         // File tree
         const tree = await this.getFileTree();
         if (tree) {

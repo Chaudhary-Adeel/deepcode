@@ -26,6 +26,7 @@ import {
 import { microcompact, shouldAutocompact, buildAutocompactPrompt, applyAutocompact } from './contextCompact';
 import { getAgentDefinition } from './agents/agentDefinitions';
 import { StreamingToolExecutor } from './streamingToolExecutor';
+import { recordTranscript, recordSubAgentTranscript } from './sessionStorage';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -78,6 +79,8 @@ export interface AgentLoopOptions {
     isSubAgent?: boolean;
     /** Called when a background sub-agent completes */
     onBackgroundComplete?: (name: string, result: string) => void;
+    /** Session ID for transcript persistence — when set, conversation is recorded to disk */
+    sessionId?: string;
 }
 
 /** Fingerprint a tool call for loop detection */
@@ -94,7 +97,10 @@ function toolCallFingerprint(name: string, args: Record<string, any>): string {
 }
 
 /** Max times the same tool call (name+args) can repeat before we consider it a loop */
-const MAX_IDENTICAL_TOOL_CALLS = 3;
+const MAX_IDENTICAL_TOOL_CALLS = 2;
+
+/** Inject a goal reminder into state.messages every N turns to prevent task drift */
+const GOAL_REMINDER_INTERVAL = 5;
 
 export interface AgentLoopResult {
     content: string;
@@ -145,6 +151,10 @@ export interface LoopState {
     promptTooLongCount: number;
     toolFailureCounts: Map<string, number>;
     blockedTools: Set<string>;
+    /** The original user goal — used to anchor the agent and prevent task drift */
+    originalGoal: string;
+    /** The turn at which the last goal reminder was injected */
+    lastGoalReminderTurn: number;
 }
 
 function createInitialState(systemPrompt: string, userMessage: string, conversationHistory?: AgentMessage[]): LoopState {
@@ -170,65 +180,120 @@ function createInitialState(systemPrompt: string, userMessage: string, conversat
         promptTooLongCount: 0,
         toolFailureCounts: new Map(),
         blockedTools: new Set(),
+        originalGoal: userMessage,
+        lastGoalReminderTurn: 0,
     };
 }
 
 // ─── Sub-Agent System Prompt ─────────────────────────────────────────────────
 
-const SUBAGENT_SYSTEM_PROMPT = `You are a focused sub-agent. Complete your assigned task quickly using tools.
+const SUBAGENT_SYSTEM_PROMPT = `You are a focused sub-agent working on a specific task. Be fast, precise, and thorough.
 
-Rules:
-- Stay focused on your task
-- Use multiple tools in parallel when possible
-- Read files before editing
-- Return a structured summary with file paths and key findings
-- Be fast and efficient — minimize tool calls`;
+## Strategy
+1. Understand the task fully before acting
+2. Read relevant files first — never edit blind
+3. Batch reads: request all needed files in one turn
+4. Make targeted, surgical changes
+5. Verify your changes compile if editing code
+
+## Output Format
+Return a clear, structured summary:
+- **What was done**: List of changes made or findings discovered
+- **Files affected**: Paths of files read or modified
+- **Key details**: Important technical details the parent agent needs to know
+- **Issues found**: Any problems, warnings, or edge cases discovered
+
+## Rules
+- Stay focused on your assigned task — don't expand scope
+- Use the minimum tools needed — efficiency matters
+- If you can't complete the task, explain what's blocking you
+- Never modify files outside the scope of your task`;
 
 // ─── Main Agent System Prompt ────────────────────────────────────────────────
 
-export const AGENT_SYSTEM_PROMPT = `You are DeepCode — an expert AI coding agent in VS Code with tools to read, write, search, and modify code.
+export const AGENT_SYSTEM_PROMPT = `You are DeepCode — an expert AI coding agent in VS Code. You think → plan → act → observe → iterate until done.
 
-You think → use tools → observe → repeat until done. Be autonomous — use tools instead of asking the user.
+## Identity & Philosophy
+- You are autonomous — use tools proactively, don't ask permission for routine operations
+- You are thorough — verify your changes work before declaring done
+- You are efficient — minimize token usage, batch operations, avoid redundant reads
+- You produce working code — partial fixes are unacceptable, iterate until the solution is complete
+- You respect the user's codebase — match existing style, conventions, and architecture
 
-## Speed Rules — READ THIS FIRST
-- If file content is ALREADY in the prompt, NEVER call read_file on it again. Use the content you have.
-- For SIMPLE questions: answer DIRECTLY without using any tools.
-- For SIMPLE edits (1-3 changes): call edit_file IMMEDIATELY with the content already provided. Do NOT explore, search, or read first.
-- Keep tool usage minimal — 1-3 calls for simple tasks, more only for genuinely complex multi-file work.
-- Prefer multiple tool calls in ONE response over spawning sub-agents.
+## Planning (CRITICAL)
+Before executing ANY multi-step task:
+1. **Assess scope**: How many files? How complex? What could go wrong?
+2. **Plan first**: For tasks touching 3+ files, think through the sequence BEFORE calling tools
+3. **Batch reads**: Read all needed files in one turn, then plan edits, then batch edits
+4. **Checkpoint**: After major changes, verify with diagnostics or run_command
+5. **Decompose**: Break large tasks into independent subtasks — parallelize with sub-agents when possible
 
-## Tool Strategy
-1. Check if you can answer or act from provided context FIRST. If file content is in the prompt, you already have it.
-2. If not, use the fewest tools needed.
-3. For understanding code: use get_file_skeleton FIRST, then read_file for specific sections.
-4. For finding code: use semantic_search for natural language, search_symbol for names, grep_search for exact text.
-5. For edits when file content is provided: edit_file directly. Do NOT read_file first — you already have the content.
-6. For edits when file content is NOT provided: read_file → edit_file. That's it.
-7. Diagnostics run automatically after edit_file — do NOT call get_diagnostics manually unless fixing reported errors.
-8. For multi-file edits: use multi_edit_files to edit several files in one call.
-9. For truly complex multi-file tasks: use run_subagent to parallelize.
-10. Use web_search only when workspace info is insufficient.
+## Tool Strategy (ranked by efficiency)
+- **Already in context?** → Use it directly. NEVER re-read a file whose content is in the conversation.
+- **Simple question?** → Answer directly, no tools needed.
+- **Need structure?** → get_file_skeleton first, then targeted read_file for specific sections.
+- **Need to find code?** → semantic_search for concepts, search_symbol for names, grep_search for exact text.
+- **Need to edit?** → If content is in context: edit_file directly. If not: read_file → edit_file. That's it.
+- **Multi-file edits?** → Use multi_edit_files for atomic changes across files.
+- **Complex task?** → Use run_subagent to parallelize independent work.
+- **Diagnostics?** → Run automatically after edits. Only call manually if debugging a specific issue.
+- **Web info?** → Use web_search only when workspace information is genuinely insufficient.
+- **Prefer batching** → Multiple tool calls in ONE response over sequential single calls.
 
-## Response Quality
-- Be direct. Lead with the answer.
-- For code changes, explain what and why briefly.
-- Match existing code style.
-- NEVER mention sub-agents, scouts, tools, or internal mechanics. Present findings naturally.
+## Confidence & Decision Making
+- **High confidence (>80%)**: Act immediately. Don't over-research obvious changes.
+- **Medium confidence (50-80%)**: Do one targeted search to confirm, then act.
+- **Low confidence (<50%)**: Research thoroughly before making changes. If still uncertain after 3 tool calls, explain your uncertainty to the user.
+- **Ambiguous request**: Make the most reasonable interpretation and proceed. Mention your assumption briefly.
+- **Conflicting evidence**: Prefer what's actually in the code over what docs/comments claim.
+
+## Resource Awareness
+- You have a limited iteration budget. Don't waste turns on unnecessary exploration.
+- If you've used 5+ tool calls on a simple task, stop and reassess your approach.
+- Long tool outputs are automatically truncated. Request specific line ranges with read_file when possible.
+- For large files (500+ lines), use get_file_skeleton first to understand structure.
+- Prefer grep_search with file patterns over reading entire directories.
+- Track what you've already learned — never re-discover the same information.
 
 ## Edit Rules
-- oldText must be verbatim from the file (copy exact text including whitespace)
-- If the file content is already in the prompt, use it directly — do NOT read_file again
-- Only read_file before edit_file when you DON'T already have the file content
-- Include enough surrounding context in oldText for a unique match
-- Diagnostics run automatically after each edit_file — if errors appear, fix them in the next step
+- oldText MUST be an exact, verbatim copy from the file (including whitespace, indentation, line breaks)
+- Include enough surrounding context in oldText for a unique match — at minimum 2-3 lines
 - For changes spanning multiple files, prefer multi_edit_files over separate edit_file calls
+- Diagnostics run automatically after edits — if errors appear, fix them immediately
 - For simple edits: just call edit_file and respond. Do not over-think it.
+- When creating new files, use write_file. When modifying existing files, always use edit_file.
+- Never use edit_file on a file you haven't read or don't have in context.
 
 ## Error Recovery
-- If a tool call fails, read the error message carefully and retry with corrected arguments.
-- NEVER give up after a single tool failure — adjust and try again.
-- If edit_file fails to find oldText, re-read the file to get the exact current content, then retry.
-- If write_file fails, check that you provided both path and content arguments.
+- On tool failure: read the error carefully, adjust arguments, retry once
+- After 2 failures of the same tool: try an alternative approach
+- If edit_file fails to match: re-read the file to get current content, then retry
+- If a command fails: check if you need to cd to the right directory or install dependencies first
+- If a sub-agent fails: analyze its output, then either retry with clearer instructions or do it yourself
+- NEVER give up after a single failure — persistence is required
+
+## Code Quality Standards
+- Match existing code style, naming conventions, and patterns exactly
+- Add imports where needed — don't leave undefined references
+- Handle edge cases and error conditions
+- Preserve existing comments and documentation unless they're now incorrect
+- When adding new functions/classes, follow the patterns established in the file
+- Test-related changes should maintain or improve coverage
+
+## Response Quality
+- Lead with the answer. Be direct and specific.
+- For code changes: briefly explain what changed and why
+- Use technical terms precisely
+- If a task is complete, say so clearly. If it's partially done, explain what remains.
+- For errors: explain the root cause, not just the symptom
+- NEVER mention internal mechanics (tools, sub-agents, iterations). Present work naturally.
+- NEVER fabricate file contents, error messages, or tool outputs.
+
+## Multi-Turn Awareness
+- Remember what the user has asked before in this conversation
+- Build on previous context — don't repeat work already done
+- If the user corrects you, acknowledge and adjust immediately
+- Track which files you've modified in this session to avoid conflicts
 
 ## Workspace
 {WORKSPACE_CONTEXT}`;
@@ -236,7 +301,7 @@ You think → use tools → observe → repeat until done. Be autonomous — use
 // ─── Agent Loop Implementation ───────────────────────────────────────────────
 
 export class AgentLoop {
-    private readonly apiClient: ApiClient;
+    private apiClient: ApiClient;
 
     constructor(private opts: AgentLoopOptions) {
         this.apiClient = createApiClient({
@@ -322,12 +387,12 @@ export class AgentLoop {
             state = { ...state, turnCount: state.turnCount + 1 };
 
             if (state.turnCount === 1) {
-                this.opts.onProgress?.('Analyzing your request...');
+                this.opts.onProgress?.('Understanding your request...');
             } else {
                 const toolsSoFar = state.toolCallLog.length;
                 const lastTool = toolsSoFar > 0 ? state.toolCallLog[toolsSoFar - 1] : null;
                 if (lastTool && !lastTool.success) {
-                    this.opts.onProgress?.(`Recovering from ${lastTool.name} issue, retrying...`);
+                    this.opts.onProgress?.(`Retrying ${lastTool.name} with adjusted approach...`);
                 }
             }
 
@@ -344,10 +409,27 @@ export class AgentLoop {
                 // ── Context compression pipeline ──
                 let compressedMessages = microcompact(state.messages);
 
+                // ── Periodic goal reminder to prevent task drift ──
+                if (
+                    state.turnCount > 1 &&
+                    state.turnCount - state.lastGoalReminderTurn >= GOAL_REMINDER_INTERVAL
+                ) {
+                    const goalReminder: AgentMessage = {
+                        role: 'user' as const,
+                        content: `[SYSTEM: Goal reminder — your original task is: "${state.originalGoal}". Stay focused on this. Do not perform work outside this scope.]`,
+                    };
+                    state = {
+                        ...state,
+                        messages: [...state.messages, goalReminder],
+                        lastGoalReminderTurn: state.turnCount,
+                    };
+                    compressedMessages = microcompact(state.messages);
+                }
+
                 if (shouldAutocompact(compressedMessages)) {
-                    this.opts.onProgress?.('Compressing conversation context...');
+                    this.opts.onProgress?.('Optimizing context window...');
                     try {
-                        const summaryPrompt = buildAutocompactPrompt(compressedMessages);
+                        const summaryPrompt = buildAutocompactPrompt(compressedMessages, state.originalGoal);
                         const summaryResult = await this.apiClient.chatCompletion({
                             messages: [
                                 { role: 'system', content: 'You are a conversation summarizer. Be concise but preserve all technical details.' },
@@ -361,6 +443,7 @@ export class AgentLoop {
                                 compressedMessages,
                                 summaryResult.content,
                                 state.turnCount,
+                                state.originalGoal,
                             );
                             state = { ...state, compactedAtTurn: state.turnCount };
                         }
@@ -383,7 +466,7 @@ export class AgentLoop {
 
                 if (isPromptTooLong && state.promptTooLongCount < 2) {
                     const attempt = state.promptTooLongCount + 1;
-                    this.opts.onProgress?.(`Prompt too long, compacting context (attempt ${attempt}/2)...`);
+                    this.opts.onProgress?.(`Context window full — compressing history (${attempt}/2)...`);
 
                     if (state.promptTooLongCount < 1) {
                         // First occurrence: autocompact
@@ -449,6 +532,16 @@ export class AgentLoop {
                         subAgentResults: state.subAgentResults,
                     };
                 }
+                // On 2nd retry, switch to fallback model if configured
+                if (consecutiveApiErrors === 2 && this.opts.fallbackModel) {
+                    this.opts.onProgress?.('Switching to fallback model...');
+                    this.opts.onModelFallback?.(this.opts.model, this.opts.fallbackModel);
+                    this.apiClient = createApiClient({
+                        apiKey: this.opts.apiKey,
+                        model: this.opts.fallbackModel,
+                        timeout: 90_000,
+                    });
+                }
                 this.opts.onProgress?.(`API error (retrying): ${errMsg}`);
                 await new Promise(r => setTimeout(r, 1000 * consecutiveApiErrors));
                 state = { ...state, transition: { reason: 'api_retry', attempt: consecutiveApiErrors } };
@@ -474,7 +567,7 @@ export class AgentLoop {
                     role: 'user' as const,
                     content: '[SYSTEM: Output limit hit. Resume directly — no recap. Break remaining work into smaller pieces.]',
                 }];
-                this.opts.onProgress?.(`Output truncated, recovering (attempt ${state.maxOutputRecoveryCount}/3)...`);
+                this.opts.onProgress?.(`Response was cut short — continuing seamlessly (${state.maxOutputRecoveryCount}/3)...`);
                 continue;
             }
 
@@ -507,7 +600,7 @@ export class AgentLoop {
                 }
 
                 if (loopDetected) {
-                    this.opts.onProgress?.('Detected repeating actions, wrapping up...');
+                    this.opts.onProgress?.('Consolidating findings...');
                     state.messages = [...state.messages, {
                         role: 'user',
                         content: '[SYSTEM: You are repeating the same tool calls. STOP using tools and respond with what you have accomplished so far.]',
@@ -561,7 +654,11 @@ export class AgentLoop {
                         if (state.blockedTools.has(tc.function.name)) {
                             const result: ToolCallResult = {
                                 success: false,
-                                output: `Tool '${tc.function.name}' has been blocked after repeated failures. Use an alternative approach.`,
+                                output: `Tool "${tc.function.name}" has been blocked after repeated failures. Alternative approaches:\n` +
+                                    '- For file reading: try get_file_skeleton first, then read_file with specific line ranges\n' +
+                                    '- For editing: re-read the file, then use write_file to replace the entire file if edit_file keeps failing\n' +
+                                    '- For searching: try a different search tool (grep_search, semantic_search, search_symbol)\n' +
+                                    '- For commands: check if the command exists and the working directory is correct',
                             };
                             this.opts.onToolResult?.(tc.function.name, result);
                             state = {
@@ -695,9 +792,26 @@ export class AgentLoop {
                             return { id: tc.id, name: tc.function.name, args, result };
                         } catch (toolError: any) {
                             const errorMsg = toolError?.message || String(toolError) || 'Unknown error';
+
+                            // Build contextual recovery suggestion
+                            let suggestion = 'Please review the arguments and try again.';
+                            if (errorMsg.includes('ENOENT') || errorMsg.includes('not found') || errorMsg.includes('no such file')) {
+                                suggestion = 'The file or path was not found. Use list_directory or search_files to find the correct path.';
+                            } else if (errorMsg.includes('permission') || errorMsg.includes('EACCES')) {
+                                suggestion = 'Permission denied. Try a different path or check file permissions.';
+                            } else if (errorMsg.includes('ENOSPC')) {
+                                suggestion = 'Disk space is full. Cannot write files.';
+                            } else if (errorMsg.includes('timeout') || errorMsg.includes('ETIMEDOUT')) {
+                                suggestion = 'The operation timed out. Try a simpler command or break it into smaller steps.';
+                            } else if (errorMsg.includes('syntax') || errorMsg.includes('parse')) {
+                                suggestion = 'There may be a syntax error in the arguments. Double-check the format.';
+                            } else if (tc.function.name === 'edit_file' && (errorMsg.includes('not found in file') || errorMsg.includes('oldText'))) {
+                                suggestion = 'The oldText was not found. Re-read the file to get the exact current content, then retry with the correct text.';
+                            }
+
                             const result: ToolCallResult = {
                                 success: false,
-                                output: `Tool '${tc.function.name}' failed: ${errorMsg}. Adjust arguments and retry, or use an alternative approach.`,
+                                output: `Tool "${tc.function.name}" failed: ${errorMsg}. ${suggestion}`,
                             };
                             this.opts.onToolResult?.(tc.function.name, result);
 
@@ -752,14 +866,33 @@ export class AgentLoop {
                     }];
                 }
 
+                // If any edit tool failed, inject a system hint to re-read before retrying
+                const editFailed = toolResults.some(tr =>
+                    ['edit_file', 'write_file', 'multi_edit_files'].includes(tr.name) && !tr.result.success
+                );
+                if (editFailed) {
+                    state.messages = [...state.messages, {
+                        role: 'user' as const,
+                        content: '[SYSTEM: An edit operation failed. Re-read the file to get the current content before retrying. Use exact, verbatim text for oldText matches.]',
+                    }];
+                }
+
                 // Check for cancellation after tool execution completes
                 if (this.opts.checkCancelled?.()) {
                     cancelRequested = true;
                 }
 
+                // Record transcript after each tool-call turn
+                if (this.opts.sessionId) {
+                    recordTranscript(this.opts.sessionId, state.messages);
+                }
+
                 state = { ...state, transition: { reason: 'next_turn' } };
             } else {
                 // No tool calls — model returned a final text response
+                if (this.opts.sessionId) {
+                    recordTranscript(this.opts.sessionId, state.messages);
+                }
                 return {
                     content: message.content || '',
                     totalTokens: state.totalTokens,
@@ -771,7 +904,7 @@ export class AgentLoop {
         }
 
         // Exceeded max iterations — force a final text response without tools
-        this.opts.onProgress?.('Wrapping up...');
+        this.opts.onProgress?.('Composing final response...');
 
         try {
             state.messages = [...state.messages, {
@@ -819,30 +952,31 @@ export class AgentLoop {
             return this.describeOneTool(toolCalls[0]);
         }
 
-        // Group by type for a clean summary
         const names = toolCalls.map(tc => tc.function.name);
         const uniqueNames = [...new Set(names)];
 
         if (uniqueNames.length === 1) {
             const name = uniqueNames[0];
-            if (name === 'read_file') { return `Reading ${toolCalls.length} files...`; }
-            if (name === 'grep_search') { return 'Searching across the codebase...'; }
-            if (name === 'run_subagent') { return 'Investigating multiple areas in parallel...'; }
+            if (name === 'read_file') return `Reading ${toolCalls.length} files in parallel`;
+            if (name === 'grep_search') return 'Searching across the codebase';
+            if (name === 'edit_file') return `Applying edits to ${toolCalls.length} files`;
+            if (name === 'run_subagent') return `Dispatching ${toolCalls.length} parallel agents`;
         }
 
-        // Mixed tools — describe the dominant action
-        const hasSearch = names.some(n => n === 'grep_search' || n === 'search_files');
-        const hasRead = names.some(n => n === 'read_file');
-        const hasEdit = names.some(n => n === 'edit_file' || n === 'write_file' || n === 'multi_edit_files');
+        const hasSearch = names.some(n => ['grep_search', 'search_files', 'semantic_search', 'search_symbol'].includes(n));
+        const hasRead = names.some(n => n === 'read_file' || n === 'get_file_skeleton');
+        const hasEdit = names.some(n => ['edit_file', 'write_file', 'multi_edit_files'].includes(n));
         const hasSubAgent = names.some(n => n === 'run_subagent');
+        const hasDiag = names.some(n => n === 'get_diagnostics' || n === 'run_command');
 
-        if (hasSubAgent) { return 'Investigating multiple areas in parallel...'; }
-        if (hasEdit) { return 'Applying changes...'; }
-        if (hasSearch && hasRead) { return 'Searching and reading relevant files...'; }
-        if (hasSearch) { return 'Searching the codebase...'; }
-        if (hasRead) { return `Reading ${names.filter(n => n === 'read_file').length} files...`; }
+        if (hasSubAgent) return `Coordinating ${names.filter(n => n === 'run_subagent').length} parallel tasks`;
+        if (hasEdit && hasDiag) return 'Applying changes and verifying';
+        if (hasEdit) return `Editing ${names.filter(n => ['edit_file', 'write_file', 'multi_edit_files'].includes(n)).length} files`;
+        if (hasSearch && hasRead) return 'Searching and analyzing code';
+        if (hasSearch) return 'Searching the codebase';
+        if (hasRead) return `Analyzing ${names.filter(n => n === 'read_file' || n === 'get_file_skeleton').length} files`;
 
-        return 'Working on it...';
+        return `Executing ${toolCalls.length} operations`;
     }
 
     private describeOneTool(tc: ToolCall): string {
@@ -851,45 +985,39 @@ export class AgentLoop {
 
         switch (tc.function.name) {
             case 'read_file': {
-                const file = args.path || '';
-                return `Reading ${file}...`;
+                const file = (args.path || '').split('/').pop() || 'file';
+                return args.startLine || args.start_line
+                    ? `Reading ${file} (lines ${args.startLine || args.start_line}–${args.endLine || args.end_line || '…'})`
+                    : `Reading ${file}`;
             }
-            case 'write_file': {
-                const file = args.path || '';
-                return `Writing ${file}...`;
-            }
-            case 'edit_file': {
-                const file = args.path || '';
-                return `Editing ${file}...`;
-            }
-            case 'multi_edit_files': {
-                const count = (args.files || []).length;
-                return `Editing ${count} file(s)...`;
-            }
+            case 'write_file': return `Creating ${(args.path || 'file').split('/').pop()}`;
+            case 'edit_file': return `Editing ${(args.path || 'file').split('/').pop()}`;
+            case 'multi_edit_files': return `Editing ${(args.files || []).length} files atomically`;
             case 'list_directory': {
-                const dir = args.path || 'project';
-                return `Exploring ${dir === '.' || dir === '' ? 'project structure' : dir}...`;
+                const dir = args.path || '.';
+                return dir === '.' || dir === '' ? 'Mapping project structure' : `Scanning ${dir}/`;
             }
-            case 'search_files':
-                return `Searching for files matching "${args.pattern || ''}"...`;
-            case 'grep_search':
-                return `Searching for "${(args.query || '').substring(0, 50)}"...`;
+            case 'search_files': return `Finding files matching "${args.pattern || '*'}"`;
+            case 'grep_search': return `Searching for "${(args.query || '').substring(0, 40)}"`;
+            case 'semantic_search': return `Semantic search: "${(args.query || '').substring(0, 40)}"`;
+            case 'search_symbol': return `Looking up \`${args.symbol || args.name || ''}\``;
+            case 'find_references': return `Tracing references to \`${args.symbol || args.symbolName || ''}\``;
+            case 'get_file_skeleton': return `Scanning file structure`;
             case 'run_command': {
                 const cmd = (args.command || '').substring(0, 40);
-                return `Running: ${cmd}...`;
+                if (cmd.includes('test')) return `Running tests`;
+                if (cmd.includes('build') || cmd.includes('tsc')) return `Building project`;
+                if (cmd.includes('lint')) return `Running linter`;
+                return `Running: ${cmd}`;
             }
-            case 'get_diagnostics':
-                return 'Checking for errors...';
-            case 'web_search':
-                return `Searching the web for "${(args.query || '').substring(0, 50)}"...`;
-            case 'fetch_webpage':
-                return 'Reading documentation...';
+            case 'get_diagnostics': return 'Checking for errors';
+            case 'web_search': return `Searching web: "${(args.query || '').substring(0, 40)}"`;
+            case 'fetch_webpage': return 'Fetching documentation';
             case 'run_subagent': {
-                const task = (args.task || '').substring(0, 60);
-                return `Working on: ${task}...`;
+                const task = (args.task || '').substring(0, 50);
+                return args.background ? `Launching background agent` : `Delegating: ${task}`;
             }
-            default:
-                return 'Working on it...';
+            default: return tc.function.name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
         }
     }
 
@@ -913,7 +1041,7 @@ export class AgentLoop {
         const task = args.task;
         const context = args.context || '';
         const shortTask = task.length > 60 ? task.substring(0, 60) + '...' : task;
-        this.opts.onProgress?.(`Working on: ${shortTask}`);
+        this.opts.onProgress?.(`Delegating: ${shortTask}`);
 
         // Determine system prompt, tools, and maxIterations from agent definition or defaults
         let systemPrompt = SUBAGENT_SYSTEM_PROMPT;
@@ -976,6 +1104,16 @@ export class AgentLoop {
 
         try {
             const result = await subAgent.run(userMsg, conversationHistory);
+
+            // Record sub-agent transcript if session tracking is active
+            if (this.opts.sessionId) {
+                const agentId = (args.name || task).replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 60);
+                const subAgentMessages: AgentMessage[] = [
+                    { role: 'user', content: userMsg },
+                    { role: 'assistant', content: result.content },
+                ];
+                recordSubAgentTranscript(this.opts.sessionId, agentId, subAgentMessages);
+            }
 
             const output =
                 `Sub-agent completed (${result.iterations} steps, ${result.toolCalls.length} tool calls):\n\n` +
