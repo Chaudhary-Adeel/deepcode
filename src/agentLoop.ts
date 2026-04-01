@@ -14,18 +14,20 @@
  *   - Conversation history support for multi-turn interactions
  */
 
-import * as https from 'https';
+import { ApiClient, createApiClient, StreamEvent, ChatCompletionOptions, ChatCompletionResult } from './apiClient';
 import {
     ToolDefinition,
     ToolExecutor,
     ToolCallResult,
     AGENT_TOOLS,
     SUBAGENT_TOOLS,
+    getToolOutputBudget,
 } from './tools';
+import { microcompact, shouldAutocompact, buildAutocompactPrompt, applyAutocompact } from './contextCompact';
+import { getAgentDefinition } from './agents/agentDefinitions';
+import { StreamingToolExecutor } from './streamingToolExecutor';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
-
-const DEEPSEEK_API_BASE = 'api.deepseek.com';
 
 export interface AgentMessage {
     role: 'system' | 'user' | 'assistant' | 'tool';
@@ -46,6 +48,8 @@ export interface ToolCall {
 export interface AgentLoopOptions {
     apiKey: string;
     model: string;
+    /** Optional fallback model to use when the primary model fails */
+    fallbackModel?: string;
     systemPrompt: string;
     temperature: number;
     topP: number;
@@ -68,8 +72,12 @@ export interface AgentLoopOptions {
     checkCancelled?: () => boolean;
     /** Stream tokens for the final response in real-time */
     onToken?: (token: string) => void;
+    /** Called when a model fallback occurs (primary model failed, using fallback) */
+    onModelFallback?: (primaryModel: string, fallbackModel: string) => void;
     /** Depth guard — prevents sub-agents from spawning more sub-agents */
     isSubAgent?: boolean;
+    /** Called when a background sub-agent completes */
+    onBackgroundComplete?: (name: string, result: string) => void;
 }
 
 /** Fingerprint a tool call for loop detection */
@@ -103,6 +111,66 @@ export interface AgentLoopResult {
         content: string;
         tokens: number;
     }>;
+}
+
+// ─── Loop State Types ────────────────────────────────────────────────────────
+
+export type LoopTransition =
+    | { reason: 'next_turn' }
+    | { reason: 'max_output_recovery'; attempt: number }
+    | { reason: 'loop_break' }
+    | { reason: 'api_retry'; attempt: number }
+    | { reason: 'prompt_too_long_recovery'; attempt: number };
+
+export interface LoopState {
+    messages: AgentMessage[];
+    toolCallLog: Array<{
+        name: string;
+        args: Record<string, any>;
+        result: string;
+        success: boolean;
+    }>;
+    subAgentResults: Array<{
+        task: string;
+        content: string;
+        tokens: number;
+    }>;
+    totalTokens: number;
+    turnCount: number;
+    maxOutputRecoveryCount: number;
+    transition: LoopTransition | undefined;
+    toolCallCounts: Map<string, number>;
+    compactedAtTurn: number;
+    backgroundAgents: Map<string, Promise<{ output: string; subResult: { task: string; content: string; tokens: number } }>>;
+    promptTooLongCount: number;
+    toolFailureCounts: Map<string, number>;
+    blockedTools: Set<string>;
+}
+
+function createInitialState(systemPrompt: string, userMessage: string, conversationHistory?: AgentMessage[]): LoopState {
+    const messages: AgentMessage[] = [
+        { role: 'system', content: systemPrompt },
+    ];
+    if (conversationHistory && conversationHistory.length > 0) {
+        messages.push(...conversationHistory);
+    }
+    messages.push({ role: 'user', content: userMessage });
+
+    return {
+        messages,
+        toolCallLog: [],
+        subAgentResults: [],
+        totalTokens: 0,
+        turnCount: 0,
+        maxOutputRecoveryCount: 0,
+        transition: undefined,
+        toolCallCounts: new Map(),
+        compactedAtTurn: 0,
+        backgroundAgents: new Map(),
+        promptTooLongCount: 0,
+        toolFailureCounts: new Map(),
+        blockedTools: new Set(),
+    };
 }
 
 // ─── Sub-Agent System Prompt ─────────────────────────────────────────────────
@@ -168,21 +236,16 @@ You think → use tools → observe → repeat until done. Be autonomous — use
 // ─── Agent Loop Implementation ───────────────────────────────────────────────
 
 export class AgentLoop {
-    private messages: AgentMessage[] = [];
-    private toolCallLog: Array<{
-        name: string;
-        args: Record<string, any>;
-        result: string;
-        success: boolean;
-    }> = [];
-    private subAgentResults: Array<{
-        task: string;
-        content: string;
-        tokens: number;
-    }> = [];
-    private totalTokens = 0;
+    private readonly apiClient: ApiClient;
 
-    constructor(private opts: AgentLoopOptions) {}
+    constructor(private opts: AgentLoopOptions) {
+        this.apiClient = createApiClient({
+            apiKey: opts.apiKey,
+            model: opts.model,
+            fallbackModel: opts.fallbackModel,
+            timeout: 90_000,
+        });
+    }
 
     /**
      * Run the agent loop with a user message.
@@ -192,70 +255,228 @@ export class AgentLoop {
         userMessage: string,
         conversationHistory?: AgentMessage[]
     ): Promise<AgentLoopResult> {
-        // Initialize messages
-        this.messages = [
-            { role: 'system', content: this.opts.systemPrompt },
-        ];
+        let state = createInitialState(this.opts.systemPrompt, userMessage, conversationHistory);
 
-        // Inject conversation history if provided
-        if (conversationHistory && conversationHistory.length > 0) {
-            this.messages.push(...conversationHistory);
-        }
-
-        this.messages.push({ role: 'user', content: userMessage });
-
-        let iteration = 0;
         let consecutiveApiErrors = 0;
-        const toolCallCounts = new Map<string, number>(); // fingerprint → count
+        let cancelRequested = false;
 
-        while (iteration < this.opts.maxIterations) {
+        while (state.turnCount < this.opts.maxIterations) {
             if (this.opts.checkCancelled?.()) {
-                throw new Error('Cancelled');
+                cancelRequested = true;
             }
 
-            iteration++;
+            // On cancel, allow current iteration to finish gracefully
+            if (cancelRequested && state.turnCount > 0) {
+                // Generate a summary of completed work instead of throwing
+                this.opts.onProgress?.('Cancellation requested, summarizing completed work...');
+                state.messages = [...state.messages, {
+                    role: 'user' as const,
+                    content: '[SYSTEM: The user cancelled the request. Respond NOW with a brief summary of what you accomplished so far. Do NOT call any tools.]',
+                }];
+                const savedTools = this.opts.tools;
+                this.opts.tools = [];
+                try {
+                    const summaryResp = await this.callAPI(state.messages, !!this.opts.onToken);
+                    this.opts.tools = savedTools;
+                    state = { ...state, totalTokens: state.totalTokens + summaryResp.tokens };
+                    return {
+                        content: summaryResp.message.content || 'Task was cancelled.',
+                        totalTokens: state.totalTokens,
+                        toolCalls: state.toolCallLog,
+                        iterations: state.turnCount,
+                        subAgentResults: state.subAgentResults,
+                    };
+                } catch {
+                    this.opts.tools = savedTools;
+                }
+                return {
+                    content: 'Task was cancelled. ' +
+                        `Completed ${state.toolCallLog.length} tool call(s) across ${state.turnCount} steps before cancellation.`,
+                    totalTokens: state.totalTokens,
+                    toolCalls: state.toolCallLog,
+                    iterations: state.turnCount,
+                    subAgentResults: state.subAgentResults,
+                };
+            }
 
-            if (iteration === 1) {
+            // Check for completed background agents
+            for (const [name, promise] of state.backgroundAgents) {
+                const resolved = await Promise.race([
+                    promise.then(r => ({ done: true as const, result: r })),
+                    Promise.resolve({ done: false as const }),
+                ]);
+                if (resolved.done) {
+                    state.backgroundAgents.delete(name);
+                    state = {
+                        ...state,
+                        messages: [...state.messages, {
+                            role: 'user' as const,
+                            content: `[Background agent '${name}' completed: ${resolved.result.output}]`,
+                        }],
+                        subAgentResults: [...state.subAgentResults, resolved.result.subResult],
+                        totalTokens: state.totalTokens + resolved.result.subResult.tokens,
+                    };
+                }
+            }
+
+            state = { ...state, turnCount: state.turnCount + 1 };
+
+            if (state.turnCount === 1) {
                 this.opts.onProgress?.('Analyzing your request...');
             } else {
-                // Only emit progress for meaningful state changes — tool call
-                // events already provide granular visibility via onToolCall/onToolResult
-                const toolsSoFar = this.toolCallLog.length;
-                const lastTool = toolsSoFar > 0 ? this.toolCallLog[toolsSoFar - 1] : null;
+                const toolsSoFar = state.toolCallLog.length;
+                const lastTool = toolsSoFar > 0 ? state.toolCallLog[toolsSoFar - 1] : null;
                 if (lastTool && !lastTool.success) {
                     this.opts.onProgress?.(`Recovering from ${lastTool.name} issue, retrying...`);
                 }
-                // Otherwise stay silent — individual tool calls tell the story
             }
 
             let response;
+            let streamingExecutor: StreamingToolExecutor | undefined;
             try {
-                // Call DeepSeek API — stream tokens after first iteration
-                // (first call likely returns tool calls; subsequent calls more likely to answer)
-                const shouldStream = iteration > 1 && !!this.opts.onToken;
-                response = await this.callAPI(shouldStream);
-                this.totalTokens += response.tokens;
+                const shouldStream = state.turnCount > 1 && !!this.opts.onToken;
+
+                // Create streaming tool executor to start tool execution during API stream
+                if (shouldStream) {
+                    streamingExecutor = new StreamingToolExecutor(this.opts.toolExecutor);
+                }
+
+                // ── Context compression pipeline ──
+                let compressedMessages = microcompact(state.messages);
+
+                if (shouldAutocompact(compressedMessages)) {
+                    this.opts.onProgress?.('Compressing conversation context...');
+                    try {
+                        const summaryPrompt = buildAutocompactPrompt(compressedMessages);
+                        const summaryResult = await this.apiClient.chatCompletion({
+                            messages: [
+                                { role: 'system', content: 'You are a conversation summarizer. Be concise but preserve all technical details.' },
+                                { role: 'user', content: summaryPrompt },
+                            ],
+                            temperature: 0,
+                            maxTokens: 2000,
+                        });
+                        if (summaryResult.content) {
+                            compressedMessages = applyAutocompact(
+                                compressedMessages,
+                                summaryResult.content,
+                                state.turnCount,
+                            );
+                            state = { ...state, compactedAtTurn: state.turnCount };
+                        }
+                    } catch {
+                        // Autocompact failed — continue with microcompacted messages
+                    }
+                }
+
+                response = await this.callAPI(compressedMessages, shouldStream, streamingExecutor);
+                state = { ...state, totalTokens: state.totalTokens + response.tokens };
                 consecutiveApiErrors = 0;
             } catch (apiError: any) {
-                consecutiveApiErrors++;
+                streamingExecutor?.discard();
                 const errMsg = apiError?.message || String(apiError);
+                const statusCode = apiError?.status || apiError?.statusCode || apiError?.response?.status;
+
+                // Detect prompt-too-long errors
+                const isPromptTooLong = statusCode === 413 ||
+                    /too long|context_length_exceeded|maximum context length/i.test(errMsg);
+
+                if (isPromptTooLong && state.promptTooLongCount < 2) {
+                    const attempt = state.promptTooLongCount + 1;
+                    this.opts.onProgress?.(`Prompt too long, compacting context (attempt ${attempt}/2)...`);
+
+                    if (state.promptTooLongCount < 1) {
+                        // First occurrence: autocompact
+                        try {
+                            const summaryPrompt = buildAutocompactPrompt(state.messages);
+                            const summaryResult = await this.apiClient.chatCompletion({
+                                messages: [
+                                    { role: 'system', content: 'You are a conversation summarizer. Be concise but preserve all technical details.' },
+                                    { role: 'user', content: summaryPrompt },
+                                ],
+                                temperature: 0,
+                                maxTokens: 2000,
+                            });
+                            if (summaryResult.content) {
+                                const compacted = applyAutocompact(
+                                    state.messages,
+                                    summaryResult.content,
+                                    state.turnCount,
+                                );
+                                state = {
+                                    ...state,
+                                    messages: compacted,
+                                    compactedAtTurn: state.turnCount,
+                                    promptTooLongCount: attempt,
+                                    transition: { reason: 'prompt_too_long_recovery', attempt },
+                                };
+                            } else {
+                                state = {
+                                    ...state,
+                                    promptTooLongCount: attempt,
+                                    transition: { reason: 'prompt_too_long_recovery', attempt },
+                                };
+                            }
+                        } catch {
+                            // If autocompact fails, still increment and try aggressive next time
+                            state = {
+                                ...state,
+                                promptTooLongCount: attempt,
+                                transition: { reason: 'prompt_too_long_recovery', attempt },
+                            };
+                        }
+                    } else {
+                        // Second occurrence: aggressive compact — keep system prompt + last 5 messages
+                        const systemMsg = state.messages[0];
+                        const recentMessages = state.messages.slice(-5);
+                        state = {
+                            ...state,
+                            messages: [systemMsg, ...recentMessages],
+                            promptTooLongCount: attempt,
+                            transition: { reason: 'prompt_too_long_recovery', attempt },
+                        };
+                    }
+                    continue;
+                }
+
+                consecutiveApiErrors++;
                 if (consecutiveApiErrors >= 3) {
-                    // Too many API failures — bail out
                     return {
                         content: `I encountered repeated API errors and couldn't complete the task. Last error: ${errMsg}`,
-                        totalTokens: this.totalTokens,
-                        toolCalls: this.toolCallLog,
-                        iterations: iteration,
-                        subAgentResults: this.subAgentResults,
+                        totalTokens: state.totalTokens,
+                        toolCalls: state.toolCallLog,
+                        iterations: state.turnCount,
+                        subAgentResults: state.subAgentResults,
                     };
                 }
                 this.opts.onProgress?.(`API error (retrying): ${errMsg}`);
-                // Wait briefly before retrying
                 await new Promise(r => setTimeout(r, 1000 * consecutiveApiErrors));
+                state = { ...state, transition: { reason: 'api_retry', attempt: consecutiveApiErrors } };
                 continue;
             }
 
             const message = response.message;
+
+            // Check for truncation (max_output_tokens hit)
+            const finishReason = response.finishReason;
+            if (finishReason === 'length' && state.maxOutputRecoveryCount < 3) {
+                state = {
+                    ...state,
+                    maxOutputRecoveryCount: state.maxOutputRecoveryCount + 1,
+                    transition: { reason: 'max_output_recovery', attempt: state.maxOutputRecoveryCount + 1 },
+                };
+                state.messages = [...state.messages, {
+                    role: 'assistant' as const,
+                    content: message.content,
+                    tool_calls: message.tool_calls,
+                }];
+                state.messages = [...state.messages, {
+                    role: 'user' as const,
+                    content: '[SYSTEM: Output limit hit. Resume directly — no recap. Break remaining work into smaller pieces.]',
+                }];
+                this.opts.onProgress?.(`Output truncated, recovering (attempt ${state.maxOutputRecoveryCount}/3)...`);
+                continue;
+            }
 
             // Check if the model wants to use tools
             if (message.tool_calls && message.tool_calls.length > 0) {
@@ -266,11 +487,11 @@ export class AgentLoop {
                 }
 
                 // Add the assistant message with tool_calls to history
-                this.messages.push({
+                state.messages = [...state.messages, {
                     role: 'assistant',
                     content: message.content,
                     tool_calls: message.tool_calls,
-                });
+                }];
 
                 // ── Loop detection: check if the agent is repeating itself ──
                 let loopDetected = false;
@@ -278,34 +499,32 @@ export class AgentLoop {
                     let args: Record<string, any> = {};
                     try { args = JSON.parse(tc.function.arguments); } catch { /* */ }
                     const fp = toolCallFingerprint(tc.function.name, args);
-                    const count = (toolCallCounts.get(fp) || 0) + 1;
-                    toolCallCounts.set(fp, count);
+                    const count = (state.toolCallCounts.get(fp) || 0) + 1;
+                    state.toolCallCounts.set(fp, count);
                     if (count >= MAX_IDENTICAL_TOOL_CALLS) {
                         loopDetected = true;
                     }
                 }
 
                 if (loopDetected) {
-                    // Break out of the loop — the agent is stuck
                     this.opts.onProgress?.('Detected repeating actions, wrapping up...');
-                    this.messages.push({
+                    state.messages = [...state.messages, {
                         role: 'user',
                         content: '[SYSTEM: You are repeating the same tool calls. STOP using tools and respond with what you have accomplished so far.]',
-                    });
-                    // Force one more API call without tools
+                    }];
                     const savedTools = this.opts.tools;
                     this.opts.tools = [];
                     try {
-                        const forceResp = await this.callAPI(!!this.opts.onToken);
-                        this.totalTokens += forceResp.tokens;
+                        const forceResp = await this.callAPI(state.messages, !!this.opts.onToken);
+                        state = { ...state, totalTokens: state.totalTokens + forceResp.tokens, transition: { reason: 'loop_break' } };
                         this.opts.tools = savedTools;
                         if (forceResp.message.content) {
                             return {
                                 content: forceResp.message.content,
-                                totalTokens: this.totalTokens,
-                                toolCalls: this.toolCallLog,
-                                iterations: iteration,
-                                subAgentResults: this.subAgentResults,
+                                totalTokens: state.totalTokens,
+                                toolCalls: state.toolCallLog,
+                                iterations: state.turnCount,
+                                subAgentResults: state.subAgentResults,
                             };
                         }
                     } catch {
@@ -314,10 +533,19 @@ export class AgentLoop {
                     break;
                 }
 
-                // Execute all tool calls in parallel
-                // Individual onToolCall callbacks emit agentStatus steps so the
-                // activity feed shows per-file detail — no batch description needed.
+                // Wait for streaming executor results (tools started during API stream)
+                let executorResultMap: Map<string, ToolCallResult> | undefined;
+                if (streamingExecutor) {
+                    if (this.opts.checkCancelled?.()) {
+                        streamingExecutor.discard();
+                        cancelRequested = true;
+                    } else {
+                        await streamingExecutor.waitForAll();
+                        executorResultMap = streamingExecutor.getResultMap();
+                    }
+                }
 
+                // Execute all tool calls (using pre-computed streaming results when available)
                 const toolResults = await Promise.all(
                     message.tool_calls.map(async (tc) => {
                         let args: Record<string, any> = {};
@@ -329,87 +557,215 @@ export class AgentLoop {
 
                         this.opts.onToolCall?.(tc.function.name, args);
 
+                        // Check if tool is blocked due to repeated failures
+                        if (state.blockedTools.has(tc.function.name)) {
+                            const result: ToolCallResult = {
+                                success: false,
+                                output: `Tool '${tc.function.name}' has been blocked after repeated failures. Use an alternative approach.`,
+                            };
+                            this.opts.onToolResult?.(tc.function.name, result);
+                            state = {
+                                ...state,
+                                toolCallLog: [...state.toolCallLog, {
+                                    name: tc.function.name,
+                                    args,
+                                    result: result.output,
+                                    success: false,
+                                }],
+                            };
+                            return { id: tc.id, name: tc.function.name, args, result };
+                        }
+
                         try {
                             // Sub-agent handling
                             if (
                                 tc.function.name === 'run_subagent' &&
                                 !this.opts.isSubAgent
                             ) {
-                                const subResult = await this.runSubAgent(
-                                    args.task || '',
-                                    args.context || ''
-                                );
+                                const subArgs = args as {
+                                    task: string;
+                                    context?: string;
+                                    mode?: 'fresh' | 'fork';
+                                    background?: boolean;
+                                    name?: string;
+                                    tools?: string[];
+                                    subagent_type?: string;
+                                };
+                                if (subArgs.background) {
+                                    const agentName = subArgs.name || `agent-${Date.now()}`;
+                                    const promise = this.runSubAgent(subArgs, state);
+                                    state.backgroundAgents.set(agentName, promise);
+                                    // Fire-and-forget: notify when complete
+                                    promise.then((res) => {
+                                        this.opts.onBackgroundComplete?.(agentName, res.output);
+                                    }).catch(() => {});
+                                    const result: ToolCallResult = {
+                                        success: true,
+                                        output: `Background agent '${agentName}' started. You will be notified when it completes.`,
+                                    };
+                                    this.opts.onToolResult?.(tc.function.name, result);
+                                    // Reset failure count on success
+                                    const updatedCounts = new Map(state.toolFailureCounts);
+                                    updatedCounts.delete(tc.function.name);
+                                    state = { ...state, toolFailureCounts: updatedCounts };
+                                    return { id: tc.id, name: tc.function.name, args, result };
+                                }
+
+                                const { output, subResult } = await this.runSubAgent(subArgs, state);
                                 const result: ToolCallResult = {
                                     success: true,
-                                    output: subResult,
+                                    output,
                                 };
                                 this.opts.onToolResult?.(tc.function.name, result);
+
+                                // Merge sub-agent results into state; reset failure count on success
+                                const updatedCounts = new Map(state.toolFailureCounts);
+                                updatedCounts.delete(tc.function.name);
+                                state = {
+                                    ...state,
+                                    subAgentResults: [...state.subAgentResults, subResult],
+                                    totalTokens: state.totalTokens + subResult.tokens,
+                                    toolFailureCounts: updatedCounts,
+                                };
+
                                 return { id: tc.id, name: tc.function.name, args, result };
                             }
 
-                            // Standard tool execution
-                            const result = await this.opts.toolExecutor.execute(
-                                tc.function.name,
-                                args
-                            );
+                            // Standard tool execution — use streaming result or execute inline
+                            const result = executorResultMap?.get(tc.id)
+                                ?? await this.opts.toolExecutor.execute(
+                                    tc.function.name,
+                                    args
+                                );
                             this.opts.onToolResult?.(tc.function.name, result);
 
-                            // Emit per-file change events for the todos/files-changed panel
                             if (result.changedFiles) {
                                 for (const cf of result.changedFiles) {
                                     this.opts.onFileChanged?.(cf);
                                 }
                             }
 
-                            this.toolCallLog.push({
-                                name: tc.function.name,
-                                args,
-                                result: result.output,
-                                success: result.success,
-                            });
+                            // Track success/failure for consecutive failure detection
+                            if (result.success) {
+                                const updatedCounts = new Map(state.toolFailureCounts);
+                                updatedCounts.delete(tc.function.name);
+                                state = {
+                                    ...state,
+                                    toolCallLog: [...state.toolCallLog, {
+                                        name: tc.function.name,
+                                        args,
+                                        result: result.output,
+                                        success: result.success,
+                                    }],
+                                    toolFailureCounts: updatedCounts,
+                                };
+                            } else {
+                                const updatedCounts = new Map(state.toolFailureCounts);
+                                const failCount = (updatedCounts.get(tc.function.name) || 0) + 1;
+                                updatedCounts.set(tc.function.name, failCount);
+                                if (failCount >= 3) {
+                                    const updatedBlocked = new Set(state.blockedTools);
+                                    updatedBlocked.add(tc.function.name);
+                                    this.opts.onProgress?.(`Tool '${tc.function.name}' blocked after ${failCount} consecutive failures.`);
+                                    state = {
+                                        ...state,
+                                        toolCallLog: [...state.toolCallLog, {
+                                            name: tc.function.name,
+                                            args,
+                                            result: result.output,
+                                            success: false,
+                                        }],
+                                        toolFailureCounts: updatedCounts,
+                                        blockedTools: updatedBlocked,
+                                    };
+                                } else {
+                                    state = {
+                                        ...state,
+                                        toolCallLog: [...state.toolCallLog, {
+                                            name: tc.function.name,
+                                            args,
+                                            result: result.output,
+                                            success: false,
+                                        }],
+                                        toolFailureCounts: updatedCounts,
+                                    };
+                                }
+                            }
 
                             return { id: tc.id, name: tc.function.name, args, result };
                         } catch (toolError: any) {
-                            // Catch ALL errors so Promise.all never rejects
                             const errorMsg = toolError?.message || String(toolError) || 'Unknown error';
                             const result: ToolCallResult = {
                                 success: false,
-                                output: `Tool "${tc.function.name}" failed with error: ${errorMsg}. Please review the arguments and try again.`,
+                                output: `Tool '${tc.function.name}' failed: ${errorMsg}. Adjust arguments and retry, or use an alternative approach.`,
                             };
                             this.opts.onToolResult?.(tc.function.name, result);
-                            this.toolCallLog.push({
-                                name: tc.function.name,
-                                args,
-                                result: result.output,
-                                success: false,
-                            });
+
+                            // Track consecutive failures for blocklisting
+                            const updatedCounts = new Map(state.toolFailureCounts);
+                            const failCount = (updatedCounts.get(tc.function.name) || 0) + 1;
+                            updatedCounts.set(tc.function.name, failCount);
+                            if (failCount >= 3) {
+                                const updatedBlocked = new Set(state.blockedTools);
+                                updatedBlocked.add(tc.function.name);
+                                this.opts.onProgress?.(`Tool '${tc.function.name}' blocked after ${failCount} consecutive failures.`);
+                                state = {
+                                    ...state,
+                                    toolCallLog: [...state.toolCallLog, {
+                                        name: tc.function.name,
+                                        args,
+                                        result: result.output,
+                                        success: false,
+                                    }],
+                                    toolFailureCounts: updatedCounts,
+                                    blockedTools: updatedBlocked,
+                                };
+                            } else {
+                                state = {
+                                    ...state,
+                                    toolCallLog: [...state.toolCallLog, {
+                                        name: tc.function.name,
+                                        args,
+                                        result: result.output,
+                                        success: false,
+                                    }],
+                                    toolFailureCounts: updatedCounts,
+                                };
+                            }
                             return { id: tc.id, name: tc.function.name, args, result };
                         }
                     })
                 );
 
-                // Add tool results to message history (truncated to prevent payload bloat)
-                const MAX_TOOL_OUTPUT_IN_HISTORY = 8000;
-                for (const { id, result } of toolResults) {
+                // Add tool results to message history (truncated per-tool budget)
+                for (const { id, name, result } of toolResults) {
                     let output = result.output;
-                    if (output.length > MAX_TOOL_OUTPUT_IN_HISTORY) {
-                        output = output.substring(0, MAX_TOOL_OUTPUT_IN_HISTORY) +
-                            `\n\n[... truncated ${output.length - MAX_TOOL_OUTPUT_IN_HISTORY} chars to keep payload lean]`;
+                    const budget = getToolOutputBudget(name, this.opts.tools);
+                    if (output.length > budget) {
+                        output = output.substring(0, budget) +
+                            `\n\n[... truncated to ${budget} chars. ${output.length - budget} chars omitted]`;
                     }
-                    this.messages.push({
-                        role: 'tool',
+                    state.messages = [...state.messages, {
+                        role: 'tool' as const,
                         content: output,
                         tool_call_id: id,
-                    });
+                    }];
                 }
+
+                // Check for cancellation after tool execution completes
+                if (this.opts.checkCancelled?.()) {
+                    cancelRequested = true;
+                }
+
+                state = { ...state, transition: { reason: 'next_turn' } };
             } else {
                 // No tool calls — model returned a final text response
                 return {
                     content: message.content || '',
-                    totalTokens: this.totalTokens,
-                    toolCalls: this.toolCallLog,
-                    iterations: iteration,
-                    subAgentResults: this.subAgentResults,
+                    totalTokens: state.totalTokens,
+                    toolCalls: state.toolCallLog,
+                    iterations: state.turnCount,
+                    subAgentResults: state.subAgentResults,
                 };
             }
         }
@@ -418,28 +774,23 @@ export class AgentLoop {
         this.opts.onProgress?.('Wrapping up...');
 
         try {
-            // One last API call with tools disabled to force a text summary
-            this.messages.push({
-                role: 'user',
+            state.messages = [...state.messages, {
+                role: 'user' as const,
                 content: '[SYSTEM: Maximum iterations reached. Respond NOW with a summary of what you accomplished. Do NOT call any tools.]',
-            });
+            }];
             const savedTools = this.opts.tools;
-            this.opts.tools = []; // Disable tools to force text response
-            const finalResponse = await this.callAPI(!!this.opts.onToken);
+            this.opts.tools = [];
+            const finalResponse = await this.callAPI(state.messages, !!this.opts.onToken);
             this.opts.tools = savedTools;
-            this.totalTokens += finalResponse.tokens;
+            state = { ...state, totalTokens: state.totalTokens + finalResponse.tokens };
 
             if (finalResponse.message.content) {
-                // Stream the final response if streaming is enabled
-                if (this.opts.onToken && finalResponse.message.content) {
-                    // Content was already streamed via onToken in callAPI
-                }
                 return {
                     content: finalResponse.message.content,
-                    totalTokens: this.totalTokens,
-                    toolCalls: this.toolCallLog,
-                    iterations: iteration,
-                    subAgentResults: this.subAgentResults,
+                    totalTokens: state.totalTokens,
+                    toolCalls: state.toolCallLog,
+                    iterations: state.turnCount,
+                    subAgentResults: state.subAgentResults,
                 };
             }
         } catch {
@@ -449,12 +800,12 @@ export class AgentLoop {
         return {
             content:
                 'I used all available iterations for this task. ' +
-                `Here is what I did: ${this.toolCallLog.length} tool call(s) across ${iteration} steps. ` +
+                `Here is what I did: ${state.toolCallLog.length} tool call(s) across ${state.turnCount} steps. ` +
                 'You may want to continue the conversation for remaining work.',
-            totalTokens: this.totalTokens,
-            toolCalls: this.toolCallLog,
-            iterations: iteration,
-            subAgentResults: this.subAgentResults,
+            totalTokens: state.totalTokens,
+            toolCalls: state.toolCallLog,
+            iterations: state.turnCount,
+            subAgentResults: state.subAgentResults,
         };
     }
 
@@ -544,19 +895,70 @@ export class AgentLoop {
 
     // ─── Sub-Agent Spawning ──────────────────────────────────────────────
 
-    private async runSubAgent(task: string, context: string): Promise<string> {
+    private async runSubAgent(
+        args: {
+            task: string;
+            context?: string;
+            mode?: 'fresh' | 'fork';
+            background?: boolean;
+            name?: string;
+            tools?: string[];
+            subagent_type?: string;
+        },
+        state: LoopState,
+    ): Promise<{
+        output: string;
+        subResult: { task: string; content: string; tokens: number };
+    }> {
+        const task = args.task;
+        const context = args.context || '';
         const shortTask = task.length > 60 ? task.substring(0, 60) + '...' : task;
         this.opts.onProgress?.(`Working on: ${shortTask}`);
+
+        // Determine system prompt, tools, and maxIterations from agent definition or defaults
+        let systemPrompt = SUBAGENT_SYSTEM_PROMPT;
+        let subTools: ToolDefinition[] = SUBAGENT_TOOLS;
+        let maxIterations = 25;
+
+        if (args.subagent_type) {
+            const def = getAgentDefinition(args.subagent_type);
+            if (def) {
+                systemPrompt = def.systemPrompt;
+                if (def.maxTurns) {
+                    maxIterations = def.maxTurns;
+                }
+                if (def.tools) {
+                    subTools = AGENT_TOOLS.filter(t => def.tools!.includes(t.function.name));
+                }
+            }
+        } else if (args.tools && args.tools.length > 0) {
+            subTools = AGENT_TOOLS.filter(t => args.tools!.includes(t.function.name));
+        } else if (args.mode === 'fork') {
+            // Fork mode: use parent tools minus run_subagent
+            subTools = SUBAGENT_TOOLS;
+        }
+
+        // Build conversation history for fork mode
+        let conversationHistory: AgentMessage[] | undefined;
+        if (args.mode === 'fork') {
+            if (!this.opts.isSubAgent) {
+                // Pass parent conversation history (skip system prompt at index 0)
+                conversationHistory = state.messages.slice(1);
+            } else {
+                // Already a sub-agent — ignore fork, use fresh mode
+                this.opts.onProgress?.('Warning: fork mode ignored (already a sub-agent). Using fresh mode.');
+            }
+        }
 
         const subAgent = new AgentLoop({
             apiKey: this.opts.apiKey,
             model: this.opts.model,
-            systemPrompt: SUBAGENT_SYSTEM_PROMPT,
+            systemPrompt,
             temperature: this.opts.temperature,
             topP: this.opts.topP,
             maxTokens: this.opts.maxTokens,
-            maxIterations: 25, // Sub-agents get a reasonable budget
-            tools: SUBAGENT_TOOLS,
+            maxIterations,
+            tools: subTools,
             toolExecutor: this.opts.toolExecutor,
             isSubAgent: true,
             onProgress: (msg) =>
@@ -573,198 +975,172 @@ export class AgentLoop {
             : `Task: ${task}`;
 
         try {
-            const result = await subAgent.run(userMsg);
+            const result = await subAgent.run(userMsg, conversationHistory);
 
-            // Track sub-agent results
-            this.subAgentResults.push({
-                task,
-                content: result.content,
-                tokens: result.totalTokens,
-            });
-
-            // Accumulate sub-agent tokens
-            this.totalTokens += result.totalTokens;
-
-            return (
+            const output =
                 `Sub-agent completed (${result.iterations} steps, ${result.toolCalls.length} tool calls):\n\n` +
-                result.content
-            );
+                result.content;
+
+            return {
+                output,
+                subResult: {
+                    task,
+                    content: result.content,
+                    tokens: result.totalTokens,
+                },
+            };
         } catch (error: any) {
-            return `Sub-agent failed: ${error.message}`;
+            return {
+                output: `Sub-agent failed: ${error.message}`,
+                subResult: {
+                    task,
+                    content: `Failed: ${error.message}`,
+                    tokens: 0,
+                },
+            };
         }
     }
 
     // ─── DeepSeek API Call ───────────────────────────────────────────────
 
-    private callAPI(streamTokens: boolean = false): Promise<{
+    private async callAPI(
+        messages: AgentMessage[],
+        streamTokens: boolean = false,
+        streamingExecutor?: StreamingToolExecutor,
+    ): Promise<{
         message: {
             content: string | null;
             tool_calls?: ToolCall[];
         };
         tokens: number;
+        finishReason: string;
     }> {
-        return new Promise((resolve, reject) => {
-            const useStream = streamTokens && !!this.opts.onToken;
+        const useStream = streamTokens && !!this.opts.onToken;
 
-            // Build the request body
-            const bodyObj: Record<string, any> = {
-                model: this.opts.model,
-                messages: this.messages.map((m) => {
-                    const msg: Record<string, any> = {
-                        role: m.role,
-                        content: m.content,
-                    };
-                    if (m.tool_calls) {
-                        msg.tool_calls = m.tool_calls;
-                    }
-                    if (m.tool_call_id) {
-                        msg.tool_call_id = m.tool_call_id;
-                    }
-                    return msg;
-                }),
-                temperature: this.opts.temperature,
-                max_tokens: this.opts.maxTokens,
-                top_p: this.opts.topP,
-                stream: useStream,
+        // Build ChatCompletionOptions from provided messages
+        const completionOpts: ChatCompletionOptions = {
+            messages: messages.map((m) => {
+                const msg: Record<string, any> = {
+                    role: m.role,
+                    content: m.content,
+                };
+                if (m.tool_calls) { msg.tool_calls = m.tool_calls; }
+                if (m.tool_call_id) { msg.tool_call_id = m.tool_call_id; }
+                return msg as ChatCompletionOptions['messages'][number];
+            }),
+            temperature: this.opts.temperature,
+            maxTokens: this.opts.maxTokens,
+            topP: this.opts.topP,
+        };
+
+        if (this.opts.tools.length > 0) {
+            completionOpts.tools = this.opts.tools;
+            completionOpts.toolChoice = 'auto';
+        }
+
+        if (useStream) {
+            // ── Streaming mode ──
+            let contentAccum = '';
+            let toolCallsAccum: ToolCall[] = [];
+            let totalTokens = 0;
+            let streamFinishReason = 'stop';
+
+            // Track which tool indices have been submitted to the streaming executor
+            const submittedIndices = new Set<number>();
+            let highestToolIndex = -1;
+
+            const submitToolBlock = (idx: number) => {
+                if (!streamingExecutor || submittedIndices.has(idx)) { return; }
+                const tc = toolCallsAccum[idx];
+                if (!tc || !tc.function.name) { return; }
+                // Skip sub-agent tools — they need special handling in run()
+                if (tc.function.name === 'run_subagent') { return; }
+
+                let args: Record<string, any>;
+                try {
+                    args = JSON.parse(tc.function.arguments || '{}');
+                } catch {
+                    args = { _raw: tc.function.arguments };
+                }
+
+                submittedIndices.add(idx);
+                streamingExecutor.addTool({ id: tc.id, name: tc.function.name, arguments: args });
             };
 
-            // Only include tools if available
-            if (this.opts.tools.length > 0) {
-                bodyObj.tools = this.opts.tools;
-                bodyObj.tool_choice = 'auto';
+            for await (const event of this.apiClient.streamChatCompletion(completionOpts)) {
+                switch (event.type) {
+                    case 'content_delta':
+                        if (event.content) {
+                            contentAccum += event.content;
+                            this.opts.onToken?.(event.content);
+                        }
+                        break;
+
+                    case 'tool_call_delta':
+                        if (event.toolCall) {
+                            const idx = event.toolCall.index;
+                            if (!toolCallsAccum[idx]) {
+                                toolCallsAccum[idx] = {
+                                    id: event.toolCall.id || '',
+                                    type: 'function',
+                                    function: { name: '', arguments: '' },
+                                };
+                            }
+                            if (event.toolCall.id) { toolCallsAccum[idx].id = event.toolCall.id; }
+                            if (event.toolCall.name) { toolCallsAccum[idx].function.name += event.toolCall.name; }
+                            if (event.toolCall.arguments) { toolCallsAccum[idx].function.arguments += event.toolCall.arguments; }
+
+                            // When a new higher index arrives, previous blocks are complete
+                            if (idx > highestToolIndex) {
+                                for (let i = Math.max(0, highestToolIndex); i < idx; i++) {
+                                    submitToolBlock(i);
+                                }
+                                highestToolIndex = idx;
+                            }
+                        }
+                        break;
+
+                    case 'message_stop':
+                        if (event.usage) {
+                            totalTokens = event.usage.totalTokens;
+                        }
+                        if (event.finishReason) {
+                            streamFinishReason = event.finishReason;
+                        }
+                        // Submit any remaining tool blocks
+                        for (let i = 0; i < toolCallsAccum.length; i++) {
+                            submitToolBlock(i);
+                        }
+                        break;
+
+                    case 'error':
+                        if (event.error?.includes('Falling back') && this.opts.fallbackModel) {
+                            this.opts.onModelFallback?.(this.opts.model, this.opts.fallbackModel);
+                        }
+                        break;
+                }
             }
 
-            const body = JSON.stringify(bodyObj);
-
-            const reqOpts: https.RequestOptions = {
-                hostname: DEEPSEEK_API_BASE,
-                port: 443,
-                path: '/chat/completions',
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    Authorization: `Bearer ${this.opts.apiKey}`,
-                    'Content-Length': Buffer.byteLength(body),
+            const hasToolCalls = toolCallsAccum.length > 0 && toolCallsAccum.some(tc => tc.function.name);
+            return {
+                message: {
+                    content: contentAccum || null,
+                    tool_calls: hasToolCalls ? toolCallsAccum : undefined,
                 },
+                tokens: totalTokens,
+                finishReason: streamFinishReason,
             };
-
-            // Timeout: kill the request if it takes too long
-            const API_TIMEOUT_MS = 90_000; // 90 seconds
-
-            const req = https.request(reqOpts, (res) => {
-                if (useStream) {
-                    // ── SSE streaming mode ──
-                    let contentAccum = '';
-                    let toolCallsAccum: ToolCall[] = [];
-                    let totalTokens = 0;
-                    let buffer = '';
-
-                    res.on('data', (chunk: Buffer) => {
-                        buffer += chunk.toString();
-                        const lines = buffer.split('\n');
-                        buffer = lines.pop() || ''; // keep incomplete line
-
-                        for (const line of lines) {
-                            const trimmed = line.trim();
-                            if (!trimmed.startsWith('data: ')) { continue; }
-                            const payload = trimmed.slice(6);
-                            if (payload === '[DONE]') { continue; }
-
-                            try {
-                                const json = JSON.parse(payload);
-                                const delta = json.choices?.[0]?.delta;
-                                if (!delta) { continue; }
-
-                                // Content tokens
-                                if (delta.content) {
-                                    contentAccum += delta.content;
-                                    this.opts.onToken?.(delta.content);
-                                }
-
-                                // Tool call deltas
-                                if (delta.tool_calls) {
-                                    for (const tc of delta.tool_calls) {
-                                        const idx = tc.index ?? 0;
-                                        if (!toolCallsAccum[idx]) {
-                                            toolCallsAccum[idx] = {
-                                                id: tc.id || '',
-                                                type: 'function',
-                                                function: { name: '', arguments: '' },
-                                            };
-                                        }
-                                        if (tc.id) { toolCallsAccum[idx].id = tc.id; }
-                                        if (tc.function?.name) { toolCallsAccum[idx].function.name += tc.function.name; }
-                                        if (tc.function?.arguments) { toolCallsAccum[idx].function.arguments += tc.function.arguments; }
-                                    }
-                                }
-
-                                // Usage in final chunk
-                                if (json.usage) {
-                                    totalTokens = json.usage.total_tokens || 0;
-                                }
-                            } catch { /* skip malformed SSE */ }
-                        }
-                    });
-
-                    res.on('end', () => {
-                        const hasToolCalls = toolCallsAccum.length > 0 && toolCallsAccum.some(tc => tc.function.name);
-                        resolve({
-                            message: {
-                                content: contentAccum || null,
-                                tool_calls: hasToolCalls ? toolCallsAccum : undefined,
-                            },
-                            tokens: totalTokens,
-                        });
-                    });
-
-                    res.on('error', (e) => reject(new Error(`Stream error: ${e.message}`)));
-                } else {
-                    // ── Non-streaming mode ──
-                    let data = '';
-                    res.on('data', (chunk) => {
-                        data += chunk;
-                    });
-                    res.on('end', () => {
-                        try {
-                            if (res.statusCode !== 200) {
-                                let errMsg = `API error: ${res.statusCode}`;
-                                try {
-                                    const err = JSON.parse(data);
-                                    errMsg = err.error?.message || errMsg;
-                                } catch { /* use default */ }
-                                reject(new Error(errMsg));
-                                return;
-                            }
-
-                            const json = JSON.parse(data);
-                            const choice = json.choices?.[0];
-                            if (!choice) {
-                                reject(new Error('No choices in API response'));
-                                return;
-                            }
-
-                            resolve({
-                                message: {
-                                    content: choice.message?.content || null,
-                                    tool_calls: choice.message?.tool_calls,
-                                },
-                                tokens: json.usage?.total_tokens || 0,
-                            });
-                        } catch (e) {
-                            reject(new Error(`Failed to parse API response: ${e}`));
-                        }
-                    });
-                }
-            });
-
-            req.on('error', (e) =>
-                reject(new Error(`Network error: ${e.message}`))
-            );
-            req.setTimeout(API_TIMEOUT_MS, () => {
-                req.destroy(new Error(`API request timed out after ${API_TIMEOUT_MS / 1000}s. The model may be overloaded — try again.`));
-            });
-            req.write(body);
-            req.end();
-        });
+        } else {
+            // ── Non-streaming mode ──
+            const result = await this.apiClient.chatCompletion(completionOpts);
+            return {
+                message: {
+                    content: result.content,
+                    tool_calls: result.toolCalls as ToolCall[] | undefined,
+                },
+                tokens: result.usage.totalTokens,
+                finishReason: result.finishReason,
+            };
+        }
     }
 }
