@@ -1,3 +1,6 @@
+# Docs (local only)
+docs/
+
 # Build output
 out/
 dist/
