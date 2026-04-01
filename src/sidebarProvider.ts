@@ -3,8 +3,10 @@ import { DeepSeekService } from './deepseekService';
 import { FileEditorService } from './fileEditorService';
 import { SubAgentService } from './subAgentService';
 import { ProviderManager } from './providers/providerManager';
-import { LLMProvider } from './providers/types';
-import { getModelPricing } from './providers/configs';
+import { LLMProvider, ProviderConfig, ProviderID } from './providers/types';
+import { ALL_PROVIDER_CONFIGS, getModelPricing, getProviderConfig } from './providers/configs';
+import { OpenAICompatibleProvider } from './providers/openaiCompatible';
+import { AnthropicProvider } from './providers/anthropic';
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'deepcode.chatView';
@@ -30,6 +32,132 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         private readonly _providerManager?: ProviderManager,
     ) {
         this._subAgentService = new SubAgentService();
+    }
+
+    private getSelectedProviderId(): ProviderID {
+        return this._providerManager?.getActiveProviderId() || 'deepseek';
+    }
+
+    private getSelectedProviderConfig(): ProviderConfig {
+        return getProviderConfig(this.getSelectedProviderId()) ?? ALL_PROVIDER_CONFIGS.deepseek;
+    }
+
+    private async getStoredApiKey(providerId: ProviderID): Promise<string | undefined> {
+        if (this._providerManager) {
+            return this._providerManager.getApiKey(providerId);
+        }
+        if (providerId === 'deepseek') {
+            return this._deepseekService.getApiKey(this._context);
+        }
+        return undefined;
+    }
+
+    private createValidationProvider(providerId: ProviderID, apiKey: string): LLMProvider {
+        const providerConfig = getProviderConfig(providerId) ?? ALL_PROVIDER_CONFIGS.deepseek;
+
+        if (providerId === 'anthropic') {
+            return new AnthropicProvider(apiKey);
+        }
+
+        let endpoint: string | undefined;
+        if (providerId === 'llamacpp') {
+            const rawEndpoint = vscode.workspace
+                .getConfiguration('deepcode')
+                .get<string>('llamacpp.endpoint', 'http://localhost:8080');
+            endpoint = rawEndpoint.replace(/^https?:\/\//, '');
+        }
+
+        return new OpenAICompatibleProvider(apiKey, providerConfig, endpoint);
+    }
+
+    private getProviderLinks(providerId: ProviderID): Array<{ label: string; url: string }> {
+        switch (providerId) {
+            case 'openai':
+                return [
+                    { label: 'OpenAI Platform', url: 'https://platform.openai.com/' },
+                    { label: 'API Docs', url: 'https://platform.openai.com/docs/api-reference' },
+                    { label: 'Usage Dashboard', url: 'https://platform.openai.com/usage' },
+                ];
+            case 'anthropic':
+                return [
+                    { label: 'Anthropic Console', url: 'https://console.anthropic.com/' },
+                    { label: 'API Docs', url: 'https://docs.anthropic.com/' },
+                    { label: 'Usage & Cost', url: 'https://console.anthropic.com/settings/usage' },
+                ];
+            case 'llamacpp':
+                return [
+                    { label: 'llama.cpp', url: 'https://github.com/ggerganov/llama.cpp' },
+                    { label: 'Server Docs', url: 'https://github.com/ggerganov/llama.cpp/tree/master/tools/server' },
+                ];
+            case 'deepseek':
+            default:
+                return [
+                    { label: 'DeepSeek Platform', url: 'https://platform.deepseek.com' },
+                    { label: 'API Docs', url: 'https://api-docs.deepseek.com' },
+                    { label: 'Usage Dashboard', url: 'https://platform.deepseek.com/usage' },
+                ];
+        }
+    }
+
+    private buildSettingsPayload() {
+        const config = vscode.workspace.getConfiguration('deepcode');
+        const providerConfig = this.getSelectedProviderConfig();
+        const baseConfig = this._providerManager?.getConfig() ?? {
+            provider: providerConfig.id,
+            model: config.get<string>('model', providerConfig.defaultModel),
+            temperature: config.get<number>('temperature', 0),
+            maxTokens: config.get<number>('maxTokens', 8192),
+            topP: config.get<number>('topP', 0.95),
+            frequencyPenalty: config.get<number>('frequencyPenalty', 0),
+            presencePenalty: config.get<number>('presencePenalty', 0),
+            stream: config.get<boolean>('streamResponses', true),
+            systemPrompt: '',
+        };
+
+        return {
+            ...baseConfig,
+            provider: providerConfig.id,
+            providerName: providerConfig.name,
+            requiresApiKey: providerConfig.requiresApiKey,
+            apiKeyPlaceholder: providerConfig.id === 'anthropic'
+                ? 'sk-ant-...'
+                : providerConfig.requiresApiKey
+                    ? 'sk-...'
+                    : 'No API key required',
+            autoSave: config.get<boolean>('autoSave', false),
+            contextLines: config.get<number>('contextLines', 50),
+            canFetchBalance: providerConfig.id === 'deepseek',
+            availableProviders: Object.values(ALL_PROVIDER_CONFIGS).map(cfg => ({
+                id: cfg.id,
+                name: cfg.name,
+                requiresApiKey: cfg.requiresApiKey,
+            })),
+            availableModels: providerConfig.models.map(model => ({
+                id: model.id,
+                name: model.name,
+                contextWindow: model.contextWindow,
+                supportsReasoning: !!model.supportsReasoning,
+            })),
+            providerLinks: this.getProviderLinks(providerConfig.id),
+        };
+    }
+
+    private async validateApiKey(apiKey: string): Promise<boolean> {
+        const trimmedKey = apiKey?.trim();
+        const providerConfig = this.getSelectedProviderConfig();
+
+        if (!providerConfig.requiresApiKey) {
+            return true;
+        }
+        if (!trimmedKey) {
+            return false;
+        }
+
+        try {
+            return await this.createValidationProvider(providerConfig.id, trimmedKey).validateConnection();
+        } catch {
+            return false;
+        }
     }
 
     /** Get the active LLM provider (returns undefined if no ProviderManager) */
@@ -80,8 +208,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
                 case 'clearApiKey': {
-                    await this._deepseekService.clearApiKey(this._context);
-                    this._view?.webview.postMessage({ type: 'apiKeyStatus', hasKey: false });
+                    await this.handleClearApiKey();
                     break;
                 }
                 case 'getSettings': {
@@ -118,7 +245,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
                 case 'validateApiKey': {
-                    const valid = await this._deepseekService.validateApiKey(data.apiKey);
+                    const valid = await this.validateApiKey(data.apiKey);
                     this._view?.webview.postMessage({ type: 'apiKeyValidation', valid });
                     break;
                 }
@@ -1074,30 +1201,104 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             return;
         }
 
-        await this._deepseekService.setApiKey(this._context, apiKey.trim());
-        this._view?.webview.postMessage({ type: 'apiKeyStatus', hasKey: true });
+        const providerConfig = this.getSelectedProviderConfig();
+        if (!providerConfig.requiresApiKey) {
+            await this.sendApiKeyStatus();
+            return;
+        }
+
+        const trimmedKey = apiKey.trim();
+        if (this._providerManager) {
+            await this._providerManager.setApiKey(providerConfig.id, trimmedKey);
+            if (providerConfig.id === 'deepseek') {
+                await this._deepseekService.setApiKey(this._context, trimmedKey);
+            }
+            this._providerManager.clearCachedProvider();
+        } else {
+            await this._deepseekService.setApiKey(this._context, trimmedKey);
+        }
+
+        await this.sendApiKeyStatus();
+    }
+
+    private async handleClearApiKey() {
+        const providerConfig = this.getSelectedProviderConfig();
+        if (!providerConfig.requiresApiKey) {
+            await this.sendApiKeyStatus();
+            return;
+        }
+
+        if (this._providerManager) {
+            await this._providerManager.clearApiKey(providerConfig.id);
+            if (providerConfig.id === 'deepseek') {
+                await this._deepseekService.clearApiKey(this._context);
+            }
+            this._providerManager.clearCachedProvider();
+        } else {
+            await this._deepseekService.clearApiKey(this._context);
+        }
+
+        await this.sendApiKeyStatus();
     }
 
     private async sendApiKeyStatus() {
-        const apiKey = await this._deepseekService.getApiKey(this._context);
+        const providerConfig = this.getSelectedProviderConfig();
+        const apiKey = providerConfig.requiresApiKey
+            ? await this.getStoredApiKey(providerConfig.id)
+            : undefined;
         this._view?.webview.postMessage({
             type: 'apiKeyStatus',
-            hasKey: !!apiKey,
+            provider: providerConfig.id,
+            providerName: providerConfig.name,
+            requiresApiKey: providerConfig.requiresApiKey,
+            hasKey: providerConfig.requiresApiKey ? !!apiKey : true,
         });
     }
 
     private async sendSettings() {
-        const config = this._deepseekService.getConfig();
         this._view?.webview.postMessage({
             type: 'settings',
-            settings: config,
+            settings: this.buildSettingsPayload(),
         });
     }
 
     private async handleUpdateSetting(key: string, value: any) {
         const config = vscode.workspace.getConfiguration('deepcode');
         try {
+            if (key === 'provider') {
+                const providerId = value as ProviderID;
+                const providerConfig = getProviderConfig(providerId);
+                if (!providerConfig) {
+                    throw new Error(`Unknown provider: ${String(value)}`);
+                }
+
+                await config.update('provider', providerId, vscode.ConfigurationTarget.Global);
+
+                const currentModel = config.get<string>('model', providerConfig.defaultModel);
+                const nextModel = providerConfig.models.some(model => model.id === currentModel)
+                    ? currentModel
+                    : providerConfig.defaultModel;
+
+                await config.update('model', nextModel, vscode.ConfigurationTarget.Global);
+                this._providerManager?.clearCachedProvider();
+                await this.sendSettings();
+                await this.sendApiKeyStatus();
+                this._view?.webview.postMessage({
+                    type: 'providerChanged',
+                    provider: providerId,
+                    model: nextModel,
+                });
+                return;
+            }
+
             await config.update(key, value, vscode.ConfigurationTarget.Global);
+
+            if (key === 'model') {
+                this._providerManager?.clearCachedProvider();
+                await this.sendSettings();
+                return;
+            }
+
             this._view?.webview.postMessage({
                 type: 'settingUpdated',
                 key,
@@ -1112,7 +1313,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private async handleGetBalance() {
-        const apiKey = await this._deepseekService.getApiKey(this._context);
+        const providerConfig = this.getSelectedProviderConfig();
+        if (providerConfig.id !== 'deepseek') {
+            this._view?.webview.postMessage({
+                type: 'balance',
+                balance: null,
+                error: `Balance lookup is only available for ${ALL_PROVIDER_CONFIGS.deepseek.name}.`,
+            });
+            return;
+        }
+
+        const apiKey = await this.getStoredApiKey('deepseek');
         if (!apiKey) {
             this._view?.webview.postMessage({
                 type: 'balance',
@@ -2851,12 +3062,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             <div class="settings-group">
                                 <h3>Model Configuration</h3>
                                 <div class="setting-item">
+                                    <label>Provider</label>
+                                    <div class="description">Choose the LLM provider DeepCode uses</div>
+                                    <select id="setting-provider"></select>
+                                </div>
+                                <div class="setting-item">
                                     <label>Model</label>
-                                    <div class="description">The DeepSeek model to use</div>
-                                    <select id="setting-model">
-                                        <option value="deepseek-chat" selected>DeepSeek V3.2 (Fast)</option>
-                                        <option value="deepseek-reasoner">DeepSeek V3.2 (Thinking)</option>
-                                    </select>
+                                    <div class="description" id="setting-model-description">Choose the model to use for DeepCode</div>
+                                    <select id="setting-model"></select>
                                 </div>
                                 <div class="setting-item">
                                     <label>Temperature: <span id="temp-value">0</span></label>
@@ -2927,8 +3140,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                     <span id="statusText">Not connected</span>
                                 </div>
                                 <div class="setting-item">
-                                    <label>DeepSeek API Key</label>
-                                    <div class="description">Stored securely in VS Code's secret storage</div>
+                                    <label id="apiKeyLabel">API Key</label>
+                                    <div class="description" id="apiKeyDescription">Stored securely in VS Code's secret storage</div>
                                     <div class="api-key-input-group">
                                         <input type="password" id="apiKeyInput" placeholder="sk-..." />
                                         <button id="saveApiKeyBtn">Save</button>
@@ -2939,7 +3152,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                     <button class="danger small" id="removeKeyBtn">Remove Key</button>
                                 </div>
                             </div>
-                            <div class="account-section">
+                            <div class="account-section" id="balanceSection">
                                 <h3>Usage & Balance</h3>
                                 <div class="balance-info" id="balanceInfo">
                                     <div class="balance-row">
@@ -2971,11 +3184,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             <div class="account-section">
                                 <h3>Links</h3>
                                 <div class="setting-item">
-                                    <div class="description">
-                                        <a href="https://platform.deepseek.com" style="color: var(--vscode-textLink-foreground);">DeepSeek Platform</a> · 
-                                        <a href="https://api-docs.deepseek.com" style="color: var(--vscode-textLink-foreground);">API Docs</a> · 
-                                        <a href="https://platform.deepseek.com/usage" style="color: var(--vscode-textLink-foreground);">Usage Dashboard</a>
-                                    </div>
+                                    <div class="description" id="providerLinks"></div>
                                 </div>
                             </div>
                         </div>
@@ -3012,6 +3221,94 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         function closeSettings() {
             document.getElementById('settingsModal').classList.add('hidden');
+        }
+
+        function setSelectOptions(selectEl, options, selectedValue, getLabel) {
+            selectEl.innerHTML = '';
+
+            options.forEach(function(optionData) {
+                const option = document.createElement('option');
+                option.value = optionData.id;
+                option.textContent = getLabel(optionData);
+                selectEl.appendChild(option);
+            });
+
+            if (selectedValue) {
+                const hasSelected = Array.from(selectEl.options).some(function(option) {
+                    return option.value === selectedValue;
+                });
+
+                if (!hasSelected) {
+                    const customOption = document.createElement('option');
+                    customOption.value = selectedValue;
+                    customOption.textContent = selectedValue + ' (custom)';
+                    selectEl.appendChild(customOption);
+                }
+
+                selectEl.value = selectedValue;
+            }
+        }
+
+        function applyProviderSettings(settings) {
+            const providerSelect = document.getElementById('setting-provider');
+            const modelSelect = document.getElementById('setting-model');
+
+            setSelectOptions(providerSelect, settings.availableProviders || [], settings.provider, function(provider) {
+                return provider.requiresApiKey ? provider.name : provider.name + ' (local)';
+            });
+
+            setSelectOptions(modelSelect, settings.availableModels || [], settings.model, function(model) {
+                var label = model.name || model.id;
+                if (model.supportsReasoning) {
+                    label += ' [reasoning]';
+                }
+                if (model.contextWindow) {
+                    label += ' (' + Math.round(model.contextWindow / 1024) + 'K context)';
+                }
+                return label;
+            });
+
+            document.getElementById('setting-model-description').textContent = settings.provider === 'llamacpp'
+                ? 'Choose the model identifier used by your local llama.cpp endpoint'
+                : 'Choose the ' + settings.providerName + ' model to use';
+
+            document.getElementById('apiKeyLabel').textContent = settings.requiresApiKey
+                ? settings.providerName + ' API Key'
+                : settings.providerName + ' Connection';
+            document.getElementById('apiKeyDescription').textContent = settings.requiresApiKey
+                ? "Stored securely in VS Code's secret storage"
+                : 'This provider runs locally and does not require an API key';
+
+            const apiKeyInput = document.getElementById('apiKeyInput');
+            apiKeyInput.placeholder = settings.apiKeyPlaceholder || 'sk-...';
+            apiKeyInput.disabled = !settings.requiresApiKey;
+
+            ['saveApiKeyBtn', 'testKeyBtn', 'removeKeyBtn'].forEach(function(id) {
+                document.getElementById(id).disabled = !settings.requiresApiKey;
+            });
+
+            const balanceSection = document.getElementById('balanceSection');
+            if (balanceSection) {
+                balanceSection.style.display = settings.canFetchBalance ? '' : 'none';
+            }
+
+            const providerLinks = document.getElementById('providerLinks');
+            providerLinks.innerHTML = '';
+
+            if (settings.providerLinks && settings.providerLinks.length > 0) {
+                settings.providerLinks.forEach(function(link, index) {
+                    const anchor = document.createElement('a');
+                    anchor.href = link.url;
+                    anchor.textContent = link.label;
+                    anchor.style.color = 'var(--vscode-textLink-foreground)';
+                    providerLinks.appendChild(anchor);
+                    if (index < settings.providerLinks.length - 1) {
+                        providerLinks.appendChild(document.createTextNode(' · '));
+                    }
+                });
+            } else {
+                providerLinks.textContent = 'No provider links available';
+            }
         }
 
         document.querySelectorAll('.modal-tab').forEach(tab => {
@@ -3052,6 +3349,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         });
 
         // --- Wire up settings controls ---
+        document.getElementById('setting-provider').addEventListener('change', function() { updateSetting('provider', this.value); });
         document.getElementById('setting-model').addEventListener('change', function() { updateSetting('model', this.value); });
         document.getElementById('setting-temperature').addEventListener('input', function() {
             document.getElementById('temp-value').textContent = this.value;
@@ -4336,7 +4634,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 case 'apiKeyStatus': {
                     const dot = document.getElementById('statusDot');
                     const text = document.getElementById('statusText');
-                    if (data.hasKey) {
+
+                    if (!data.requiresApiKey) {
+                        dot.className = 'status-dot connected';
+                        text.textContent = 'No API key required';
+                    } else if (data.hasKey) {
                         dot.className = 'status-dot connected';
                         text.textContent = 'API key configured';
                     } else {
@@ -4355,7 +4657,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 case 'settings': {
                     const s = data.settings;
-                    document.getElementById('setting-model').value = s.model;
+                    applyProviderSettings(s);
                     document.getElementById('setting-temperature').value = s.temperature;
                     document.getElementById('temp-value').textContent = s.temperature;
                     document.getElementById('setting-maxTokens').value = s.maxTokens;
@@ -4366,6 +4668,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     document.getElementById('setting-presencePenalty').value = s.presencePenalty;
                     document.getElementById('pres-value').textContent = s.presencePenalty;
                     document.getElementById('setting-streamResponses').checked = s.stream;
+                    document.getElementById('setting-autoSave').checked = !!s.autoSave;
+                    document.getElementById('setting-contextLines').value = s.contextLines;
+                    break;
+                }
+                case 'providerChanged': {
+                    vscode.postMessage({ type: 'getSettings' });
+                    vscode.postMessage({ type: 'getApiKeyStatus' });
                     break;
                 }
                 case 'balance': {
