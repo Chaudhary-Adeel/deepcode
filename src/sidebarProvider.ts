@@ -2,6 +2,9 @@ import * as vscode from 'vscode';
 import { DeepSeekService } from './deepseekService';
 import { FileEditorService } from './fileEditorService';
 import { SubAgentService } from './subAgentService';
+import { ProviderManager } from './providers/providerManager';
+import { LLMProvider } from './providers/types';
+import { getModelPricing } from './providers/configs';
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'deepcode.chatView';
@@ -23,9 +26,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         private readonly _extensionUri: vscode.Uri,
         private readonly _context: vscode.ExtensionContext,
         private readonly _deepseekService: DeepSeekService,
-        private readonly _fileEditorService: FileEditorService
+        private readonly _fileEditorService: FileEditorService,
+        private readonly _providerManager?: ProviderManager,
     ) {
         this._subAgentService = new SubAgentService();
+    }
+
+    /** Get the active LLM provider (returns undefined if no ProviderManager) */
+    private async _getActiveProvider(): Promise<{ apiKey: string; model: string; provider?: LLMProvider }> {
+        if (this._providerManager) {
+            const providerId = this._providerManager.getActiveProviderId();
+            const apiKey = await this._providerManager.getApiKey(providerId) || '';
+            const provider = await this._providerManager.getActiveProvider() ?? undefined;
+            const cfg = this._deepseekService.getConfig();
+            return { apiKey, model: cfg.model, provider };
+        }
+        const apiKey = await this._deepseekService.getApiKey(this._context) || '';
+        const cfg = this._deepseekService.getConfig();
+        return { apiKey, model: cfg.model };
     }
 
     public resolveWebviewView(
@@ -549,11 +567,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private async handleChatMessage(message: string, attachedFiles?: string[]) {
-        const apiKey = await this._deepseekService.getApiKey(this._context);
-        if (!apiKey) {
+        const { apiKey, provider } = await this._getActiveProvider();
+        const providerId = this._providerManager?.getActiveProviderId() || 'deepseek';
+        if (!apiKey && providerId !== 'llamacpp') {
             this._view?.webview.postMessage({
                 type: 'error',
-                message: 'Please set your DeepSeek API key in settings.',
+                message: 'Please set your API key in settings.',
             });
             return;
         }
@@ -696,6 +715,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     this._pendingFileChanges.set(fileChange.relPath, fileChange.originalContent);
                     this._view?.webview.postMessage({ type: 'fileChange', ...fileChange });
                 },
+                provider,
             );
 
             // If streaming didn't already send tokens, send the full content
@@ -737,11 +757,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private async handleEditFile(instruction: string, attachedFiles?: string[]) {
-        const apiKey = await this._deepseekService.getApiKey(this._context);
-        if (!apiKey) {
+        const { apiKey, provider } = await this._getActiveProvider();
+        const providerId = this._providerManager?.getActiveProviderId() || 'deepseek';
+        if (!apiKey && providerId !== 'llamacpp') {
             this._view?.webview.postMessage({
                 type: 'error',
-                message: 'Please set your DeepSeek API key first.',
+                message: 'Please set your API key first.',
             });
             return;
         }
@@ -940,6 +961,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 },
                 // onFileChanged not passed here — the edit-proposal diff view covers file changes
                 undefined,
+                undefined, // sessionId
+                provider,
             );
 
             // Try to get a structured edit result.

@@ -81,6 +81,14 @@
       {
         "command": "deepcode.fixCode",
         "title": "DeepCode: Fix Selected Code with AI"
+      },
+      {
+        "command": "deepcode.switchProvider",
+        "title": "DeepCode: Switch LLM Provider"
+      },
+      {
+        "command": "deepcode.switchModel",
+        "title": "DeepCode: Switch Model"
       }
     ],
     "menus": {
@@ -110,18 +118,32 @@
     "configuration": {
       "title": "DeepCode",
       "properties": {
+        "deepcode.provider": {
+          "type": "string",
+          "default": "deepseek",
+          "enum": [
+            "deepseek",
+            "openai",
+            "anthropic",
+            "llamacpp"
+          ],
+          "enumDescriptions": [
+            "DeepSeek — Affordable, high-quality coding models",
+            "OpenAI — GPT-4o, o1, and other models",
+            "Anthropic — Claude 3.5 Sonnet, Haiku, Opus",
+            "llama.cpp — Local models via OpenAI-compatible server"
+          ],
+          "description": "The LLM provider to use."
+        },
         "deepcode.model": {
           "type": "string",
           "default": "deepseek-chat",
-          "enum": [
-            "deepseek-chat",
-            "deepseek-reasoner"
-          ],
-          "enumDescriptions": [
-            "DeepSeek V3.2 — Fast, non-thinking mode",
-            "DeepSeek V3.2 — Thinking mode (chain-of-thought reasoning)"
-          ],
-          "description": "The DeepSeek model to use. Both run on V3.2 (128K context)."
+          "description": "The model to use. Available models depend on the selected provider."
+        },
+        "deepcode.llamacpp.endpoint": {
+          "type": "string",
+          "default": "http://localhost:8080",
+          "description": "The base URL for your llama.cpp server (OpenAI-compatible endpoint)."
         },
         "deepcode.temperature": {
           "type": "number",

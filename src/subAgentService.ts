@@ -21,6 +21,7 @@ import { ReferenceMiner } from './agents/referenceMiner';
 import { Verifier, VerifyResult } from './agents/verifier';
 import { loadTranscript } from './sessionStorage';
 import { QueryEngine, QueryEngineOptions } from './queryEngine';
+import { LLMProvider } from './providers/types';
 
 /**
  * Sub-Agent Service for DeepCode — v3 (Agentic Tool-Use Architecture)
@@ -86,10 +87,12 @@ export class SubAgentService {
         model: string,
         systemPrompt: string,
         opts?: Partial<QueryEngineOptions>,
+        provider?: LLMProvider,
     ): QueryEngine {
         let engine = this.engines.get(sessionId);
         if (!engine) {
             engine = new QueryEngine({
+                provider,
                 apiKey,
                 model,
                 sessionId,
@@ -119,6 +122,7 @@ export class SubAgentService {
         onStatus?: (status: string) => void,
         checkCancelled?: () => boolean,
         sessionId?: string,
+        provider?: LLMProvider,
     ): Promise<OrchestratedResponse> {
         onStatus?.('Preparing workspace context...');
         if (checkCancelled?.()) { throw new Error('Cancelled'); }
@@ -151,7 +155,7 @@ export class SubAgentService {
         if (sessionId) {
             const engine = this.getOrCreateEngine(sessionId, apiKey, model, systemPrompt, {
                 onProgress: onStatus,
-            });
+            }, provider);
             const result = await engine.submitMessage(fullUserMessage);
             return this.mapToOrchestratedResponse(result);
         }
@@ -159,6 +163,7 @@ export class SubAgentService {
         // Fallback: direct AgentLoop for sessionless calls (backward compat)
         const toolExecutor = new ToolExecutor();
         const agentLoop = new AgentLoop({
+            provider,
             apiKey,
             model,
             systemPrompt,
@@ -190,6 +195,7 @@ export class SubAgentService {
         topP: number,
         onStatus?: (status: string) => void,
         checkCancelled?: () => boolean,
+        provider?: LLMProvider,
     ): Promise<OrchestratedResponse> {
         onStatus?.('Restoring session history...');
 
@@ -202,7 +208,7 @@ export class SubAgentService {
 
         const engine = this.getOrCreateEngine(sessionId, apiKey, model, systemPrompt, {
             onProgress: onStatus,
-        });
+        }, provider);
 
         const loaded = await engine.loadSession(sessionId);
         if (!loaded) {
@@ -249,6 +255,7 @@ export class SubAgentService {
         onLLMReason?: (reasoning: string) => void,
         onFileChanged?: (file: { relPath: string; originalContent: string; added: number; removed: number }) => void,
         sessionId?: string,
+        provider?: LLMProvider,
     ): Promise<OrchestratedResponse> {
         onStatus?.('Preparing workspace context...');
         if (checkCancelled?.()) { throw new Error('Cancelled'); }
@@ -281,12 +288,13 @@ export class SubAgentService {
                 onToolResult,
                 onLLMReason,
                 onFileChanged,
-            });
+            }, provider);
             result = await engine.submitMessage(userMessage);
         } else {
             // Direct AgentLoop for sessionless calls (backward compat)
             const toolExecutor = new ToolExecutor();
             const agentLoop = new AgentLoop({
+                provider,
                 apiKey,
                 model,
                 systemPrompt,
@@ -390,6 +398,7 @@ export class SubAgentService {
         onToken?: (token: string) => void,
         onLLMReason?: (reasoning: string) => void,
         onFileChanged?: (file: { relPath: string; originalContent: string; added: number; removed: number }) => void,
+        provider?: LLMProvider,
     ): Promise<AgentLoopResult> {
         const toolExecutor = new ToolExecutor();
         const contextManager = new ContextManager();
@@ -647,6 +656,7 @@ export class SubAgentService {
         onStatus?.('Agent initialized — working on your request...');
 
         const agentLoop = new AgentLoop({
+            provider,
             apiKey,
             model,
             systemPrompt: budgetResult.systemPrompt,

@@ -16,10 +16,11 @@ import {
 } from './agentLoop';
 import { ToolExecutor, AGENT_TOOLS, ToolCallResult } from './tools';
 import { recordTranscript, loadTranscript } from './sessionStorage';
+import { LLMProvider } from './providers/types';
 
-// ─── DeepSeek V3 pricing (per 1M tokens) ────────────────────────────────────
-const INPUT_COST_PER_M = 0.14;
-const OUTPUT_COST_PER_M = 0.28;
+// ─── Default pricing — overridden by provider config ─────────────────────────
+const DEFAULT_INPUT_COST_PER_M = 0.14;
+const DEFAULT_OUTPUT_COST_PER_M = 0.28;
 // Rough split assumption: 60% input, 40% output
 const INPUT_RATIO = 0.6;
 const OUTPUT_RATIO = 0.4;
@@ -28,6 +29,8 @@ const BUDGET_WARNING_THRESHOLD = 0.8;
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface QueryEngineOptions {
+    provider?: LLMProvider;
+    pricing?: { inputPerMillion: number; outputPerMillion: number };
     apiKey: string;
     model: string;
     fallbackModel?: string;
@@ -81,6 +84,7 @@ export class QueryEngine {
 
         // 2. Create AgentLoop
         const loopOpts: AgentLoopOptions = {
+            provider: this.opts.provider,
             apiKey: this.opts.apiKey,
             model: this.opts.model,
             fallbackModel: this.opts.fallbackModel,
@@ -160,7 +164,7 @@ export class QueryEngine {
         return this.turnCount;
     }
 
-    /** Estimate cost based on token usage (DeepSeek V3 pricing) */
+    /** Estimate cost based on token usage (uses provider pricing if available) */
     getEstimatedCost(): number {
         return this.totalCost;
     }
@@ -183,9 +187,11 @@ export class QueryEngine {
     // ─── Private ─────────────────────────────────────────────────────────
 
     private estimateTurnCost(tokens: number): number {
+        const inputCost = this.opts.pricing?.inputPerMillion ?? DEFAULT_INPUT_COST_PER_M;
+        const outputCost = this.opts.pricing?.outputPerMillion ?? DEFAULT_OUTPUT_COST_PER_M;
         const inputTokens = tokens * INPUT_RATIO;
         const outputTokens = tokens * OUTPUT_RATIO;
-        return (inputTokens / 1_000_000) * INPUT_COST_PER_M
-             + (outputTokens / 1_000_000) * OUTPUT_COST_PER_M;
+        return (inputTokens / 1_000_000) * inputCost
+             + (outputTokens / 1_000_000) * outputCost;
     }
 }

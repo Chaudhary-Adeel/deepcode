@@ -7,6 +7,9 @@ import { DirtyTracker } from './dirtyTracker';
 import { IndexEngine } from './indexEngine';
 import { SymbolGraph } from './symbolGraph';
 import { CodeSearch } from './codeSearch';
+import { ProviderManager } from './providers/providerManager';
+import { ALL_PROVIDER_CONFIGS } from './providers/configs';
+import { ProviderID } from './providers/types';
 
 let sidebarProvider: SidebarProvider;
 let statusBarItem: vscode.StatusBarItem;
@@ -32,6 +35,7 @@ export function activate(context: vscode.ExtensionContext) {
     const deepseekService = new DeepSeekService();
     const fileEditorService = new FileEditorService();
     const subAgentService = new SubAgentService();
+    const providerManager = new ProviderManager(context);
 
     // ── Status Bar Item ──────────────────────────────────────────────────
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -114,7 +118,8 @@ export function activate(context: vscode.ExtensionContext) {
         context.extensionUri,
         context,
         deepseekService,
-        fileEditorService
+        fileEditorService,
+        providerManager,
     );
 
     context.subscriptions.push(
@@ -125,12 +130,21 @@ export function activate(context: vscode.ExtensionContext) {
         )
     );
 
-    // Command: Set API Key
+    // Command: Set API Key (provider-aware)
     context.subscriptions.push(
         vscode.commands.registerCommand('deepcode.setApiKey', async () => {
+            const providerId = providerManager.getActiveProviderId();
+
+            // llama.cpp doesn't need an API key
+            if (providerId === 'llamacpp') {
+                vscode.window.showInformationMessage('DeepCode: llama.cpp runs locally — no API key needed.');
+                return;
+            }
+
+            const providerLabel = ALL_PROVIDER_CONFIGS[providerId].name;
             const key = await vscode.window.showInputBox({
-                prompt: 'Enter your DeepSeek API Key',
-                placeHolder: 'sk-...',
+                prompt: `Enter your ${providerLabel} API Key`,
+                placeHolder: providerId === 'anthropic' ? 'sk-ant-...' : 'sk-...',
                 password: true,
                 ignoreFocusOut: true,
                 validateInput: (value) => {
@@ -142,24 +156,34 @@ export function activate(context: vscode.ExtensionContext) {
             });
 
             if (key) {
-                await deepseekService.setApiKey(context, key.trim());
-                vscode.window.showInformationMessage('DeepCode: API key saved securely.');
+                await providerManager.setApiKey(providerId, key.trim());
+                // Also store via DeepSeekService for backward compatibility
+                if (providerId === 'deepseek') {
+                    await deepseekService.setApiKey(context, key.trim());
+                }
+                vscode.window.showInformationMessage(`DeepCode: ${providerLabel} API key saved securely.`);
                 sidebarProvider.postMessage({ type: 'apiKeyStatus', hasKey: true });
             }
         })
     );
 
-    // Command: Clear API Key
+    // Command: Clear API Key (provider-aware)
     context.subscriptions.push(
         vscode.commands.registerCommand('deepcode.clearApiKey', async () => {
+            const providerId = providerManager.getActiveProviderId();
+            const providerLabel = ALL_PROVIDER_CONFIGS[providerId].name;
+
             const confirm = await vscode.window.showWarningMessage(
-                'Are you sure you want to remove your DeepSeek API key?',
+                `Are you sure you want to remove your ${providerLabel} API key?`,
                 'Yes',
                 'No'
             );
             if (confirm === 'Yes') {
-                await deepseekService.clearApiKey(context);
-                vscode.window.showInformationMessage('DeepCode: API key removed.');
+                await providerManager.clearApiKey(providerId);
+                if (providerId === 'deepseek') {
+                    await deepseekService.clearApiKey(context);
+                }
+                vscode.window.showInformationMessage(`DeepCode: ${providerLabel} API key removed.`);
                 sidebarProvider.postMessage({ type: 'apiKeyStatus', hasKey: false });
             }
         })
@@ -354,6 +378,94 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
+    // Command: Switch LLM Provider
+    context.subscriptions.push(
+        vscode.commands.registerCommand('deepcode.switchProvider', async () => {
+            const providers: Array<vscode.QuickPickItem & { id: ProviderID }> = [
+                { id: 'deepseek', label: '$(cloud) DeepSeek', description: 'Affordable coding models' },
+                { id: 'openai', label: '$(cloud) OpenAI', description: 'GPT-4o, o1, and more' },
+                { id: 'anthropic', label: '$(cloud) Anthropic', description: 'Claude 3.5 Sonnet, Haiku, Opus' },
+                { id: 'llamacpp', label: '$(server) llama.cpp', description: 'Local models (no API key needed)' },
+            ];
+
+            const current = providerManager.getActiveProviderId();
+            const currentIdx = providers.findIndex(p => p.id === current);
+            if (currentIdx >= 0) {
+                providers[currentIdx].description += ' (current)';
+            }
+
+            const pick = await vscode.window.showQuickPick(providers, {
+                placeHolder: 'Select an LLM provider',
+            });
+
+            if (pick) {
+                const config = vscode.workspace.getConfiguration('deepcode');
+                await config.update('provider', pick.id, vscode.ConfigurationTarget.Global);
+
+                // Set model to provider's default
+                const providerConfig = ALL_PROVIDER_CONFIGS[pick.id];
+                const defaultModel = providerConfig.models[0]?.id || providerConfig.defaultModel;
+                await config.update('model', defaultModel, vscode.ConfigurationTarget.Global);
+
+                providerManager.clearCachedProvider();
+                vscode.window.showInformationMessage(
+                    `DeepCode: Switched to ${providerConfig.name} (${defaultModel})`
+                );
+                sidebarProvider.postMessage({
+                    type: 'providerChanged',
+                    provider: pick.id,
+                    model: defaultModel,
+                });
+            }
+        })
+    );
+
+    // Command: Switch Model
+    context.subscriptions.push(
+        vscode.commands.registerCommand('deepcode.switchModel', async () => {
+            const providerId = providerManager.getActiveProviderId();
+            const providerConfig = ALL_PROVIDER_CONFIGS[providerId];
+            const currentModel = vscode.workspace.getConfiguration('deepcode').get<string>('model', providerConfig.defaultModel);
+
+            const models = providerConfig.models.map(m => ({
+                label: m.id === currentModel ? `$(check) ${m.id}` : `     ${m.id}`,
+                description: m.contextWindow ? `${(m.contextWindow / 1024).toFixed(0)}K context` : undefined,
+                id: m.id,
+            }));
+
+            if (models.length === 0) {
+                // llama.cpp — let user type a model name
+                const modelName = await vscode.window.showInputBox({
+                    prompt: 'Enter the model name served by your llama.cpp server',
+                    placeHolder: 'e.g., llama-3.1-8b',
+                });
+                if (modelName) {
+                    await vscode.workspace.getConfiguration('deepcode')
+                        .update('model', modelName.trim(), vscode.ConfigurationTarget.Global);
+                    providerManager.clearCachedProvider();
+                    vscode.window.showInformationMessage(`DeepCode: Model set to ${modelName.trim()}`);
+                }
+                return;
+            }
+
+            const pick = await vscode.window.showQuickPick(models, {
+                placeHolder: `Select a model (${providerConfig.name})`,
+            });
+
+            if (pick) {
+                await vscode.workspace.getConfiguration('deepcode')
+                    .update('model', pick.id, vscode.ConfigurationTarget.Global);
+                providerManager.clearCachedProvider();
+                vscode.window.showInformationMessage(`DeepCode: Model switched to ${pick.id}`);
+                sidebarProvider.postMessage({
+                    type: 'providerChanged',
+                    provider: providerId,
+                    model: pick.id,
+                });
+            }
+        })
+    );
+
     // Command: Open Settings
     context.subscriptions.push(
         vscode.commands.registerCommand('deepcode.openSettings', () => {
@@ -455,12 +567,17 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
-    // Check for API key on startup and prompt if not set
+    // Migrate old API key format and check for API key on startup
     (async () => {
-        const apiKey = await deepseekService.getApiKey(context);
+        await providerManager.migrateApiKey();
+        const providerId = providerManager.getActiveProviderId();
+        // llama.cpp doesn't need an API key
+        if (providerId === 'llamacpp') { return; }
+        const apiKey = await providerManager.getApiKey(providerId);
         if (!apiKey) {
+            const providerLabel = ALL_PROVIDER_CONFIGS[providerId].name;
             const action = await vscode.window.showInformationMessage(
-                'DeepCode: Welcome! Set up your DeepSeek API key to get started.',
+                `DeepCode: Welcome! Set up your ${providerLabel} API key to get started.`,
                 'Set API Key',
                 'Later'
             );

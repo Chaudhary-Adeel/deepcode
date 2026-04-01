@@ -128,6 +128,12 @@ export class ProviderManager {
         return !!key;
     }
 
+    /** Clear the cached provider so the next call to getActiveProvider() creates a fresh one */
+    clearCachedProvider(): void {
+        this.cachedProvider = null;
+        this.cachedProviderId = null;
+    }
+
     onConfigurationChanged(): void {
         this.invalidateCache();
     }

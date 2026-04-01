@@ -15,6 +15,9 @@
  */
 
 import { ApiClient, createApiClient, StreamEvent, ChatCompletionOptions, ChatCompletionResult } from './apiClient';
+import { LLMProvider } from './providers/types';
+import { OpenAICompatibleProvider } from './providers/openaiCompatible';
+import { DEEPSEEK_CONFIG } from './providers/configs';
 import {
     ToolDefinition,
     ToolExecutor,
@@ -47,6 +50,8 @@ export interface ToolCall {
 }
 
 export interface AgentLoopOptions {
+    /** LLM provider instance — when set, apiKey/model are ignored for API calls */
+    provider?: LLMProvider;
     apiKey: string;
     model: string;
     /** Optional fallback model to use when the primary model fails */
@@ -301,15 +306,19 @@ Before executing ANY multi-step task:
 // ─── Agent Loop Implementation ───────────────────────────────────────────────
 
 export class AgentLoop {
-    private apiClient: ApiClient;
+    private provider: LLMProvider;
 
     constructor(private opts: AgentLoopOptions) {
-        this.apiClient = createApiClient({
-            apiKey: opts.apiKey,
-            model: opts.model,
-            fallbackModel: opts.fallbackModel,
-            timeout: 90_000,
-        });
+        if (opts.provider) {
+            this.provider = opts.provider;
+        } else {
+            this.provider = new OpenAICompatibleProvider(
+                opts.apiKey,
+                DEEPSEEK_CONFIG,
+                undefined,
+                opts.fallbackModel,
+            );
+        }
     }
 
     /**
@@ -430,7 +439,7 @@ export class AgentLoop {
                     this.opts.onProgress?.('Optimizing context window...');
                     try {
                         const summaryPrompt = buildAutocompactPrompt(compressedMessages, state.originalGoal);
-                        const summaryResult = await this.apiClient.chatCompletion({
+                        const summaryResult = await this.provider.chatCompletion({
                             messages: [
                                 { role: 'system', content: 'You are a conversation summarizer. Be concise but preserve all technical details.' },
                                 { role: 'user', content: summaryPrompt },
@@ -472,7 +481,7 @@ export class AgentLoop {
                         // First occurrence: autocompact
                         try {
                             const summaryPrompt = buildAutocompactPrompt(state.messages);
-                            const summaryResult = await this.apiClient.chatCompletion({
+                            const summaryResult = await this.provider.chatCompletion({
                                 messages: [
                                     { role: 'system', content: 'You are a conversation summarizer. Be concise but preserve all technical details.' },
                                     { role: 'user', content: summaryPrompt },
@@ -533,14 +542,14 @@ export class AgentLoop {
                     };
                 }
                 // On 2nd retry, switch to fallback model if configured
-                if (consecutiveApiErrors === 2 && this.opts.fallbackModel) {
+                if (consecutiveApiErrors === 2 && this.opts.fallbackModel && !this.opts.provider) {
                     this.opts.onProgress?.('Switching to fallback model...');
                     this.opts.onModelFallback?.(this.opts.model, this.opts.fallbackModel);
-                    this.apiClient = createApiClient({
-                        apiKey: this.opts.apiKey,
-                        model: this.opts.fallbackModel,
-                        timeout: 90_000,
-                    });
+                    this.provider = new OpenAICompatibleProvider(
+                        this.opts.apiKey,
+                        DEEPSEEK_CONFIG,
+                        undefined,
+                    );
                 }
                 this.opts.onProgress?.(`API error (retrying): ${errMsg}`);
                 await new Promise(r => setTimeout(r, 1000 * consecutiveApiErrors));
@@ -1205,7 +1214,7 @@ export class AgentLoop {
                 streamingExecutor.addTool({ id: tc.id, name: tc.function.name, arguments: args });
             };
 
-            for await (const event of this.apiClient.streamChatCompletion(completionOpts)) {
+            for await (const event of this.provider.streamChatCompletion(completionOpts)) {
                 switch (event.type) {
                     case 'content_delta':
                         if (event.content) {
@@ -1270,7 +1279,7 @@ export class AgentLoop {
             };
         } else {
             // ── Non-streaming mode ──
-            const result = await this.apiClient.chatCompletion(completionOpts);
+            const result = await this.provider.chatCompletion(completionOpts);
             return {
                 message: {
                     content: result.content,
